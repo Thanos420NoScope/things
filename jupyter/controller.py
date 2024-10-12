@@ -200,13 +200,13 @@ def execute_on_online_ips(username, password, command, max_workers=50, output_ar
     
     return results
 
-# New function to get VM IP from host IP
+# Function to get VM IP from host IP
 def get_vm_ip(host_ip):
     ip_parts = host_ip.split('.')
     ip_parts[2] = '5' + ip_parts[2][1:]
     return '.'.join(ip_parts)
 
-# New function to execute command on VMs
+# Function to execute command on VMs
 def execute_on_vms(username, password, command, max_workers=50, output_area=None):
     logger.info("Starting command execution on VMs")
     host_ips = load_online_ips()
@@ -251,7 +251,7 @@ def execute_on_vms(username, password, command, max_workers=50, output_area=None
 
 # UI Elements
 start_ip_widget = widgets.Text(value='172.16.10.0', description="Start IP:")
-end_ip_widget = widgets.Text(value='172.16.16.100', description="End IP:")
+end_ip_widget = widgets.Text(value='172.16.20.100', description="End IP:")
 username_widget = widgets.Text(value='root', description="Username:")
 password_widget = widgets.Password(value='password', description="Password:")
 command_widget = widgets.Text(description="Command:", value='uname -a')
