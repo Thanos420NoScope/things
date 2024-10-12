@@ -90,3 +90,9 @@ Both scripts log their actions to `/var/log/server_setup.log` or `/var/log/clien
 - These scripts must be run as root.
 - They disable SSH password authentication, so make sure you have SSH key access set up before running them.
 - The scripts add GitHub keys from the specified GitHub user. Make sure to provide a valid GitHub username.
+
+## Post installation
+
+- Docker cache: /var/lib/docker-registry
+- PiHole stats: http://192.168.2.55/admin/index.php
+- APT-NG: http://192.168.2.55:3142/acng-report.html?doCount=Count+Data
