@@ -1,6 +1,6 @@
 # Server and Client Setup Scripts
 
-This project contains two Bash scripts designed to automate the setup and configuration of server and client machines. These scripts provide a flexible and customizable way to deploy consistent environments across multiple machines.
+This project contains two scripts designed to automate the setup and configuration of cache servers and client machines for bandwidth effficiency.
 
 ## Scripts
 
