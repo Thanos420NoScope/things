@@ -15,11 +15,12 @@ Both scripts include the following features:
 - System update and upgrade
 - Installation of essential tools (Docker, Git, Python, etc.)
 - SSH configuration (disabling password authentication)
+- GitHub key addition from a specified GitHub username
 - Fail2ban setup
 - Automatic security updates
 - Timezone setting (America/New_York)
 - System optimization
-- GitHub key addition from a specified GitHub username
+
 
 ### Server-specific features
 
