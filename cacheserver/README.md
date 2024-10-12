@@ -94,9 +94,9 @@ Both scripts log their actions to `/var/log/server_setup.log` or `/var/log/clien
 
 ## Security Considerations
 
-- These scripts must be run as root.
+- The scripts must be run as root.
 - The scripts disable password authentication and add ssh keys from the specified GitHub user, make sure to provide a GitHub username with valid authentication keys.
-- If this server dies, clients lose connectivity. Consider running this in HA if you have multiple servers.
+- If the server dies, clients lose connectivity. Consider running it in HA if you have multiple servers.
 
 ## Post installation
 
