@@ -43,7 +43,7 @@ wget -O server.sh https://raw.githubusercontent.com/Thanos420NoScope/things/refs
 ```
 Manual:
 ```bash
-sudo ./server.sh [OPTIONS]
+./server.sh [OPTIONS]
 ```
 
 Options:
@@ -56,10 +56,10 @@ Options:
 
 Examples:
 ```bash
-sudo ./server.sh --install-pihole --github-user YourGitHubUsername
+./server.sh --install-pihole --github-user YourGitHubUsername
 ```
 ```bash
-sudo ./server.sh --install-apt-cache --install-docker-mirror --install-pihole --github-user YourGitHubUsername
+./server.sh --install-apt-cache --install-docker-mirror --install-pihole --github-user YourGitHubUsername
 ```
 
 ### Client Setup
@@ -69,7 +69,7 @@ wget -O client.sh https://raw.githubusercontent.com/Thanos420NoScope/things/refs
 ```
 Manual:
 ```bash
-sudo ./client.sh [OPTIONS]
+./client.sh [OPTIONS]
 ```
 
 Options:
@@ -82,10 +82,10 @@ Options:
 
 Examples:
 ```bash
-sudo ./client.sh --pihole-dns 192.168.2.31 --docker-mirror 192.168.2.55:5000 --github-user YourGitHubUsername
+./client.sh --pihole-dns 192.168.2.31 --docker-mirror 192.168.2.55:5000 --github-user YourGitHubUsername
 ```
 ```bash
-sudo ./client.sh --apt-cache 192.168.2.55 --docker-mirror 192.168.2.55:5000 --pihole-dns 192.168.2.55 --github-user YourGitHubUsername
+./client.sh --apt-cache 192.168.2.55 --docker-mirror 192.168.2.55:5000 --pihole-dns 192.168.2.55 --github-user YourGitHubUsername
 ```
 
 ## Logging
