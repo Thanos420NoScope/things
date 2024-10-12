@@ -1,6 +1,7 @@
-# Server and Client Setup Scripts
+# Cache Servers
 
-This project contains two scripts designed to automate the setup and configuration of cache servers and client machines for bandwidth effficiency.
+This project contains two scripts designed to automate the setup and configuration of cache servers and client machines for bandwidth effficiency.  
+It is recommended to run those only on fresh proxmox containers. Scripts have not been tested in VMs and baremetal.
 
 ## Scripts
 
