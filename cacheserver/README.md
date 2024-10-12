@@ -37,7 +37,7 @@ Both scripts include the following features:
 ### Server Setup
 Quick: (Edit Username)
 ```bash
-wget --no-cache -O - https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/server.sh | bash --install-apt-cache --install-docker-mirror --install-pihole --github-user YourGitHubUsername
+wget -O server.sh https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/server.sh && chmod +x server.sh && ./server.sh --install-apt-cache --install-docker-mirror --install-pihole --github-user YourGitHubUsername
 ```
 Manual:
 ```bash
@@ -60,7 +60,7 @@ sudo ./server.sh --install-apt-cache --install-docker-mirror --install-pihole --
 ### Client Setup
 Quick: (Edit IPs and Username)
 ```bash
-wget --no-cache -O - https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/client.sh | bash --apt-cache 192.168.2.55 --docker-mirror 192.168.2.55:5000 --pihole-dns 192.168.2.55 --github-user YourGitHubUsername
+wget -O client.sh https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/client.sh && chmod +x client.sh && ./client.sh --apt-cache 192.168.2.55 --docker-mirror 192.168.2.55:5000 --pihole-dns 192.168.2.55 --github-user YourGitHubUsername
 ```
 Manual:
 ```bash
