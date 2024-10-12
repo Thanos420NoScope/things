@@ -35,11 +35,11 @@ Both scripts include the following features:
 ## Usage
 
 ### Server Setup
-
-```quick
-wget --no-cache -O - https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/server.sh | bash -h
+Quick: (Edit Username)
+```bash
+wget --no-cache -O - https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/server.sh | bash --install-apt-cache --install-docker-mirror --install-pihole --github-user YourGitHubUsername
 ```
-
+Manual:
 ```bash
 sudo ./server.sh [OPTIONS]
 ```
@@ -58,11 +58,11 @@ sudo ./server.sh --install-apt-cache --install-docker-mirror --install-pihole --
 ```
 
 ### Client Setup
-
-```quick
-wget --no-cache -O - https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/client.sh | bash -h
+Quick: (Edit IPs and Username)
+```bash
+wget --no-cache -O - https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/client.sh | bash --apt-cache 192.168.2.55 --docker-mirror 192.168.2.55:5000 --pihole-dns 192.168.2.55 --github-user YourGitHubUsername
 ```
-
+Manual:
 ```bash
 sudo ./client.sh [OPTIONS]
 ```
