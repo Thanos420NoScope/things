@@ -9,10 +9,10 @@ import argparse
 import sys
 from typing import Optional, Dict, List
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 def setup_logging() -> logging.Logger:
     """Setup logging with fallback to current directory if default path is not writable"""
-    # First try user's home directory, then fall back to current directory
     log_paths = [
         Path.home() / 'gitea_sync.log',
         Path('./gitea_sync.log')
@@ -20,9 +20,7 @@ def setup_logging() -> logging.Logger:
     
     for log_path in log_paths:
         try:
-            # Ensure parent directory exists
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            
             logging.basicConfig(
                 level=logging.DEBUG,
                 format='%(asctime)s - %(levelname)s - %(message)s',
@@ -38,13 +36,11 @@ def setup_logging() -> logging.Logger:
             print(f"Failed to setup logging at {log_path}: {e}")
             continue
     
-    # If all paths fail, exit
     print("Could not initialize logging at any location")
     sys.exit(1)
 
 class GiteaReleaseSync:
-    def __init__(self, github_token: str, gitea_url: str = "http://127.0.0.1:8003"):
-        """Initialize with GitHub token and Gitea configuration"""
+    def __init__(self, github_token: str):
         self.logger = logging.getLogger(__name__)
         self.logger.info("Initializing GiteaReleaseSync")
         
@@ -52,15 +48,15 @@ class GiteaReleaseSync:
             self.logger.error("GitHub token is required")
             raise ValueError("GitHub token is required")
             
-        self.gitea_url = gitea_url.rstrip('/')
+        self.gitea_url = "http://127.0.0.1:8003"
         self.github_token = github_token
         
-        # Test Gitea connectivity first
+        # Test Gitea connectivity
         try:
             response = requests.get(
                 f"{self.gitea_url}/api/v1/version",
                 timeout=10,
-                verify=False  # Add this if using self-signed certificates
+                verify=False
             )
             response.raise_for_status()
             self.logger.info(f"Successfully connected to Gitea server: {response.json()}")
@@ -68,11 +64,9 @@ class GiteaReleaseSync:
             self.logger.error(f"Cannot connect to Gitea server at {self.gitea_url}: {e}")
             raise
 
-        # Local root credentials
         self.admin_user = 'root'
         self.admin_pass = 'password'
         
-        # Get or create Gitea token
         self.gitea_token = self._create_token()
         if not self.gitea_token:
             self.logger.error("Failed to create Gitea token")
@@ -93,7 +87,6 @@ class GiteaReleaseSync:
     def _create_token(self) -> Optional[str]:
         """Create a new access token in Gitea"""
         try:
-            # First try to list existing tokens
             existing_tokens = requests.get(
                 f"{self.gitea_url}/api/v1/users/{self.admin_user}/tokens",
                 auth=(self.admin_user, self.admin_pass),
@@ -102,7 +95,6 @@ class GiteaReleaseSync:
             )
             
             if existing_tokens.status_code == 200:
-                # Delete old sync tokens
                 for token in existing_tokens.json():
                     if token['name'].startswith('release-sync-'):
                         self.logger.info(f"Deleting old token: {token['name']}")
@@ -178,7 +170,6 @@ class GiteaReleaseSync:
             return None
             
         try:
-            # Handle SSH URLs
             if url.startswith('git@'):
                 pattern = r'git@github\.com:([^/]+)/([^/]+?)(?:\.git)?$'
                 match = re.search(pattern, url)
@@ -188,7 +179,6 @@ class GiteaReleaseSync:
                         'repo': match.group(2)
                     }
             
-            # Handle HTTPS URLs
             pattern = r'github\.com/([^/]+)/([^/\n.]+?)(?:\.git)?$'
             match = re.search(pattern, url)
             if match:
@@ -207,7 +197,7 @@ class GiteaReleaseSync:
     def github_request(self, url: str) -> requests.Response:
         """Make a request to GitHub API with rate limit handling"""
         max_retries = 3
-        retry_delay = 60  # seconds
+        retry_delay = 60
         
         for attempt in range(max_retries):
             try:
@@ -217,7 +207,6 @@ class GiteaReleaseSync:
                     timeout=30
                 )
                 
-                # Check for rate limiting
                 if response.status_code == 403 and 'X-RateLimit-Remaining' in response.headers:
                     remaining = int(response.headers['X-RateLimit-Remaining'])
                     if remaining == 0:
@@ -238,10 +227,65 @@ class GiteaReleaseSync:
                     self.logger.error(f"GitHub API request failed for {url}: {e}")
                     raise
 
-    def sync_releases(self, github_owner: str, github_repo: str, gitea_owner: str, gitea_repo: str) -> None:
-        """Sync releases from GitHub to local Gitea"""
+    def download_asset(self, url: str, headers: Dict) -> Optional[tuple]:
+        """Download a release asset to a temporary file"""
         try:
-            # Get GitHub releases
+            response = requests.get(
+                url,
+                headers=headers,
+                stream=True,
+                timeout=30
+            )
+            response.raise_for_status()
+            
+            content_disposition = response.headers.get('content-disposition')
+            if content_disposition and 'filename=' in content_disposition:
+                filename = re.findall("filename=(.+)", content_disposition)[0].strip('"')
+            else:
+                filename = url.split('/')[-1]
+                
+            temp_file = NamedTemporaryFile(delete=False)
+            
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    temp_file.write(chunk)
+                    
+            temp_file.close()
+            return (temp_file.name, filename)
+            
+        except Exception as e:
+            self.logger.error(f"Failed to download asset from {url}: {e}")
+            return None
+
+    def upload_asset(self, release_id: int, temp_path: str, filename: str, gitea_owner: str, gitea_repo: str) -> bool:
+        """Upload an asset to a Gitea release"""
+        try:
+            upload_url = f"{self.gitea_url}/api/v1/repos/{gitea_owner}/{gitea_repo}/releases/{release_id}/assets"
+            
+            with open(temp_path, 'rb') as f:
+                files = {'attachment': (filename, f)}
+                response = requests.post(
+                    upload_url,
+                    headers={'Authorization': f'token {self.gitea_token}'},
+                    files=files,
+                    timeout=60,
+                    verify=False
+                )
+                response.raise_for_status()
+                return True
+                
+        except Exception as e:
+            self.logger.error(f"Failed to upload asset {filename}: {e}")
+            return False
+        finally:
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+
+    def sync_releases(self, github_owner: str, github_repo: str, gitea_owner: str, gitea_repo: str) -> None:
+        """Sync releases and their assets from GitHub to local Gitea"""
+        try:
             github_releases_url = f"https://api.github.com/repos/{github_owner}/{github_repo}/releases"
             self.logger.info(f"Fetching GitHub releases from: {github_releases_url}")
             github_response = self.github_request(github_releases_url)
@@ -253,7 +297,6 @@ class GiteaReleaseSync:
                 
             self.logger.info(f"Found {len(github_releases)} releases on GitHub")
 
-            # Get existing Gitea releases
             gitea_releases_url = f"{self.gitea_url}/api/v1/repos/{gitea_owner}/{gitea_repo}/releases"
             gitea_response = requests.get(
                 gitea_releases_url,
@@ -263,19 +306,23 @@ class GiteaReleaseSync:
             )
             gitea_response.raise_for_status()
             
-            existing_releases = {release['tag_name'] for release in gitea_response.json()}
+            existing_releases = {
+                release['tag_name']: release['id'] 
+                for release in gitea_response.json()
+            }
             self.logger.info(f"Found {len(existing_releases)} existing releases in Gitea")
 
-            # Create missing releases
             for release in github_releases:
                 try:
-                    if release['tag_name'] not in existing_releases:
-                        self.logger.info(f"Creating release {release['tag_name']}")
+                    tag_name = release['tag_name']
+                    
+                    if tag_name not in existing_releases:
+                        self.logger.info(f"Creating release {tag_name}")
                         
                         release_data = {
-                            'tag_name': release['tag_name'],
+                            'tag_name': tag_name,
                             'target_commitish': release['target_commitish'],
-                            'name': release['name'] or release['tag_name'],
+                            'name': release['name'] or tag_name,
                             'body': release['body'] or '',
                             'draft': False,
                             'prerelease': release['prerelease']
@@ -289,24 +336,55 @@ class GiteaReleaseSync:
                             verify=False
                         )
                         create_response.raise_for_status()
-                        self.logger.info(f"Created release {release['tag_name']} for {gitea_owner}/{gitea_repo}")
+                        release_id = create_response.json()['id']
+                        self.logger.info(f"Created release {tag_name}")
+                    else:
+                        release_id = existing_releases[tag_name]
+
+                    if release.get('assets'):
+                        self.logger.info(f"Syncing {len(release['assets'])} assets for release {tag_name}")
                         
+                        existing_assets_response = requests.get(
+                            f"{self.gitea_url}/api/v1/repos/{gitea_owner}/{gitea_repo}/releases/{release_id}/assets",
+                            headers=self.headers_gitea,
+                            timeout=30,
+                            verify=False
+                        )
+                        existing_assets = {
+                            asset['name'] for asset in existing_assets_response.json()
+                        }
+
+                        for asset in release['assets']:
+                            if asset['name'] in existing_assets:
+                                self.logger.debug(f"Asset {asset['name']} already exists, skipping")
+                                continue
+                                
+                            self.logger.info(f"Downloading asset: {asset['name']}")
+                            download_result = self.download_asset(
+                                asset['browser_download_url'],
+                                self.headers_github
+                            )
+                            
+                            if download_result:
+                                temp_path, filename = download_result
+                                if self.upload_asset(release_id, temp_path, filename, gitea_owner, gitea_repo):
+                                    self.logger.info(f"Successfully uploaded asset: {filename}")
+                                else:
+                                    self.logger.error(f"Failed to upload asset: {filename}")
+                
                 except Exception as e:
-                    self.logger.error(f"Failed to create release {release['tag_name']}: {e}")
+                    self.logger.error(f"Failed to process release {release['tag_name']}: {e}")
                     continue
 
         except Exception as e:
             self.logger.error(f"Failed to sync releases for {github_owner}/{github_repo} to {gitea_owner}/{gitea_repo}: {e}")
 
 def main():
-    """Main execution function"""
-    # Setup logging first thing
     logger = setup_logging()
     logger.info("Starting script")
     
     parser = argparse.ArgumentParser(description='Sync GitHub releases to Gitea')
     parser.add_argument('--github-token', '-t', required=True, help='GitHub Personal Access Token')
-    parser.add_argument('--gitea-url', '-u', default='http://127.0.0.1:8003', help='Gitea server URL')
     
     try:
         args = parser.parse_args()
@@ -320,7 +398,7 @@ def main():
 
     try:
         logger.info("Starting release sync process")
-        syncer = GiteaReleaseSync(args.github_token, args.gitea_url)
+        syncer = GiteaReleaseSync(args.github_token)
         
         # Test GitHub token validity
         try:
