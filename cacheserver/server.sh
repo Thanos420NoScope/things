@@ -13,6 +13,7 @@ INSTALL_DOCKER_MIRROR=false
 INSTALL_PIHOLE=false
 INSTALL_GIT_CACHE=false
 GITHUB_USER=""
+GITHUB_TOKEN=""
 GIT_CACHE_DIR="/var/cache/git-cache"
 APT_CACHE_PORT=8000
 DOCKER_MIRROR_PORT=8001
@@ -64,10 +65,11 @@ show_help() {
     echo "  --install-pihole          Install Pi-hole"
     echo "  --install-git-cache       Install Git Proxy Cache"
     echo "  --github-user USERNAME    Specify the GitHub username for SSH key addition (required)"
+    echo "  --github-token TOKEN      Specify the GitHub token for release script (required)"
     echo "  --timezone TIMEZONE       Set the timezone (default: America/New_York)"
     echo
     echo "Example:"
-    echo "  $0 --install-apt-cache --install-docker-mirror --install-pihole --install-git-cache --github-user YourGitHubUsername"
+    echo "  $0 --install-apt-cache --install-docker-mirror --install-pihole --install-git-cache --github-user YourGitHubUsername --github-token YourGitHubToken"
 }
 
 parse_arguments() {
@@ -85,6 +87,12 @@ parse_arguments() {
                     handle_error "GitHub username cannot be empty"
                 fi
                 shift ;;
+            --github-token)
+                GITHUB_TOKEN="$2"
+                if [ -z "$GITHUB_TOKEN" ]; then
+                    handle_error "GitHub token cannot be empty"
+                fi
+                shift ;;
             --timezone)
                 TIMEZONE="$2"
                 if [ -z "$TIMEZONE" ]; then
@@ -98,6 +106,10 @@ parse_arguments() {
 
     if [ -z "$GITHUB_USER" ]; then
         handle_error "GitHub username is required. Use --github-user USERNAME to specify."
+    fi
+    
+    if [ -z "$GITHUB_TOKEN" ]; then
+        handle_error "GitHub token is required. Use --github-token TOKEN to specify."
     fi
 }
 
@@ -169,6 +181,7 @@ show_summary() {
     echo -e "${GREEN}$CHECK_MARK${NC} Set timezone to $TIMEZONE"
     echo -e "${GREEN}$CHECK_MARK${NC} Optimize system settings"
     echo -e "${GREEN}$CHECK_MARK${NC} Add GitHub keys from user: $GITHUB_USER"
+    echo -e "${GREEN}$CHECK_MARK${NC} Set up release script with GitHub token"
 }
 
 confirm_execution() {
@@ -325,7 +338,7 @@ install_git_cache() {
     # Create Gitea user
     useradd -r -m -d /home/gitea gitea
 
-# Download and install Gitea
+    # Download and install Gitea
     wget -O /usr/local/bin/gitea https://dl.gitea.io/gitea/1.19.0/gitea-1.19.0-linux-amd64
     chmod +x /usr/local/bin/gitea
 
@@ -361,7 +374,7 @@ START_SSH_SERVER = false
 OFFLINE_MODE = false
 
 [repository]
-ROOT = /var/lib/gitea/repos
+ROOT = ${GIT_CACHE_DIR}
 ENABLE_PRIVATE_REPO = false
 DEFAULT_MIRROR = true
 DEFAULT_PRIVATE = false
@@ -636,6 +649,19 @@ add_github_keys() {
     log_message "INFO" "GitHub SSH keys added successfully"
 }
 
+setup_release_script() {
+    log_message "INFO" "Setting up release script..."
+    
+    # Download the release script
+    wget -O /root/release.py https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/release.py || handle_error "Failed to download release script"
+    chmod +x /root/release.py || handle_error "Failed to make release script executable"
+    
+    # Add cron job
+    (crontab -l 2>/dev/null; echo "*/30 * * * * /root/release.py $GITHUB_TOKEN") | crontab - || handle_error "Failed to add cron job"
+    
+    log_message "INFO" "Release script setup completed"
+}
+
 perform_final_checks() {
     log_message "INFO" "Performing final system checks..."
     
@@ -703,6 +729,9 @@ add_github_keys
 [ "$INSTALL_DOCKER_MIRROR" = true ] && install_docker_registry_mirror
 [ "$INSTALL_PIHOLE" = true ] && install_pihole
 [ "$INSTALL_GIT_CACHE" = true ] && install_git_cache
+
+# Setup release script
+setup_release_script
 
 # Final tasks
 perform_final_checks
@@ -798,8 +827,8 @@ echo -e "\n${GREEN}Server setup completed successfully${NC}"
 echo -e "\nService Information:"
 [ "$INSTALL_APT_CACHE" = true ] && echo "APT-Cacher NG: http://$LOCAL_IP:$APT_CACHE_PORT"
 [ "$INSTALL_DOCKER_MIRROR" = true ] && echo "Docker Registry Mirror: http://$LOCAL_IP:$DOCKER_MIRROR_PORT"
-[ "$INSTALL_PIHOLE" = true ] && echo -e "Pi-hole Admin Interface: http://$LOCAL_IP:$PIHOLE_WEB_PORT"
-[ "$INSTALL_GIT_CACHE" = true ] && echo -e "Gitea Interface: http://$LOCAL_IP:$GIT_CACHE_PORTD"
+[ "$INSTALL_PIHOLE" = true ] && echo "Pi-hole Admin Interface: http://$LOCAL_IP:$PIHOLE_WEB_PORT"
+[ "$INSTALL_GIT_CACHE" = true ] && echo "Gitea Interface: http://$LOCAL_IP:$GIT_CACHE_PORT"
 
 echo -e "\nImportant Note: Please reboot the system to ensure all changes take effect."
 echo -e "Log file location: $LOG_FILE"
