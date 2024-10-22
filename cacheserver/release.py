@@ -7,9 +7,10 @@ import re
 import time
 import argparse
 import sys
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Set
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from datetime import datetime, timezone
 
 def setup_logging() -> logging.Logger:
     """Setup logging with fallback to current directory if default path is not writable"""
@@ -43,6 +44,10 @@ class GiteaReleaseSync:
     def __init__(self, github_token: str):
         self.logger = logging.getLogger(__name__)
         self.logger.info("Initializing GiteaReleaseSync")
+        
+        # Initialize state file path
+        self.state_file = Path.home() / '.gitea_sync_state.json'
+        self.sync_state = self._load_sync_state()
         
         if not github_token:
             self.logger.error("GitHub token is required")
@@ -83,6 +88,24 @@ class GiteaReleaseSync:
             'Accept': 'application/vnd.github.v3+json',
             'Authorization': f'token {self.github_token}'
         }
+
+    def _load_sync_state(self) -> Dict:
+        """Load the sync state from file"""
+        try:
+            if self.state_file.exists():
+                with open(self.state_file, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            self.logger.warning(f"Could not load sync state: {e}")
+        return {'repos': {}, 'last_sync': None}
+
+    def _save_sync_state(self) -> None:
+        """Save the current sync state to file"""
+        try:
+            with open(self.state_file, 'w') as f:
+                json.dump(self.sync_state, f)
+        except Exception as e:
+            self.logger.error(f"Failed to save sync state: {e}")
 
     def _create_token(self) -> Optional[str]:
         """Create a new access token in Gitea"""
@@ -286,6 +309,9 @@ class GiteaReleaseSync:
     def sync_releases(self, github_owner: str, github_repo: str, gitea_owner: str, gitea_repo: str) -> None:
         """Sync releases and their assets from GitHub to local Gitea"""
         try:
+            repo_key = f"{github_owner}/{github_repo}"
+            last_sync = self.sync_state['repos'].get(repo_key, {}).get('last_sync')
+            
             github_releases_url = f"https://api.github.com/repos/{github_owner}/{github_repo}/releases"
             self.logger.info(f"Fetching GitHub releases from: {github_releases_url}")
             github_response = self.github_request(github_releases_url)
@@ -296,6 +322,22 @@ class GiteaReleaseSync:
                 return
                 
             self.logger.info(f"Found {len(github_releases)} releases on GitHub")
+
+            # Sort releases by published date
+            github_releases.sort(key=lambda x: x.get('published_at', ''), reverse=True)
+
+            # If we have a last sync time, filter to only newer releases
+            if last_sync:
+                last_sync_time = datetime.fromisoformat(last_sync.replace('Z', '+00:00'))
+                github_releases = [
+                    release for release in github_releases
+                    if datetime.fromisoformat(release['published_at'].replace('Z', '+00:00')) > last_sync_time
+                ]
+                self.logger.info(f"Found {len(github_releases)} new releases since last sync")
+
+            if not github_releases:
+                self.logger.info("No new releases to sync")
+                return
 
             gitea_releases_url = f"{self.gitea_url}/api/v1/repos/{gitea_owner}/{gitea_repo}/releases"
             gitea_response = requests.get(
@@ -310,7 +352,6 @@ class GiteaReleaseSync:
                 release['tag_name']: release['id'] 
                 for release in gitea_response.json()
             }
-            self.logger.info(f"Found {len(existing_releases)} existing releases in Gitea")
 
             for release in github_releases:
                 try:
@@ -376,6 +417,12 @@ class GiteaReleaseSync:
                     self.logger.error(f"Failed to process release {release['tag_name']}: {e}")
                     continue
 
+            # Update sync state for this repository
+            if not self.sync_state['repos'].get(repo_key):
+                self.sync_state['repos'][repo_key] = {}
+            self.sync_state['repos'][repo_key]['last_sync'] = datetime.now(timezone.utc).isoformat()
+            self._save_sync_state()
+
         except Exception as e:
             self.logger.error(f"Failed to sync releases for {github_owner}/{github_repo} to {gitea_owner}/{gitea_repo}: {e}")
 
@@ -385,6 +432,7 @@ def main():
     
     parser = argparse.ArgumentParser(description='Sync GitHub releases to Gitea')
     parser.add_argument('--github-token', '-t', required=True, help='GitHub Personal Access Token')
+    parser.add_argument('--force-sync', '-f', action='store_true', help='Force sync all releases ignoring last sync time')
     
     try:
         args = parser.parse_args()
@@ -399,6 +447,12 @@ def main():
     try:
         logger.info("Starting release sync process")
         syncer = GiteaReleaseSync(args.github_token)
+        
+        # If force sync is requested, clear the sync state
+        if args.force_sync:
+            logger.info("Force sync requested - clearing sync state")
+            syncer.sync_state = {'repos': {}, 'last_sync': None}
+            syncer._save_sync_state()
         
         # Test GitHub token validity
         try:
