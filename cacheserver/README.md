@@ -143,7 +143,7 @@ After installation:
    - Select "New Migration"
    - Choose "GitHub"
    - Enter the repository URL
-   - Configure mirroring options as needed
+   - Tick "This repository will be a mirror"
 
 ### Release Synchronization
 

@@ -663,7 +663,7 @@ setup_release_script() {
     chmod +x /root/release.py || handle_error "Failed to make release script executable"
     
     # Add cron job
-    (crontab -l 2>/dev/null; echo "*/30 * * * * cd /root && python3 release.py -t $GITHUB_TOKEN") | crontab - || handle_error "Failed to add cron job"
+    (crontab -l 2>/dev/null; echo "*/30 * * * * sleep 30 && cd /root && python3 release.py -t $GITHUB_TOKEN") | crontab - || handle_error "Failed to add cron job"
     
     log_message "INFO" "Release script setup completed"
 }
