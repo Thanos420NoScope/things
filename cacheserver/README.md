@@ -105,7 +105,6 @@ Examples:
 - Pi-hole Web Interface: 8002/tcp
 - Pi-hole DNS: 53/tcp, 53/udp
 - Gitea: 8003/tcp
-- HTTP/HTTPS: 80/tcp, 443/tcp (if needed)
 
 ### Client Firewall
 - Allows SSH (22/tcp) in/out
