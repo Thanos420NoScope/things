@@ -1,16 +1,17 @@
 # Cache Server
 
-This project contains two scripts designed to automate the setup and configuration of cache servers and client machines for bandwidth efficiency and enhanced security.  
+This project contains scripts designed to automate the setup and configuration of cache servers and client machines for bandwidth efficiency and enhanced security.  
 It is recommended to run these only on fresh proxmox containers. Scripts have not been tested in VMs and baremetal.
 
 ## Scripts
 
 1. `server.sh`: Configures a server with hardened configuration, UFW firewall, and various caching tools.
 2. `client.sh`: Configures a client with hardened configuration and UFW firewall using the cache server.
+3. `release.py`: Syncs GitHub releases to Gitea for mirrored repositories (automatically installed by server.sh).
 
 ## Features
 
-Both scripts include the following features:
+Both server and client scripts include the following features:
 
 - System update and upgrade
 - Installation of essential tools (Docker, Git, Python, etc.)
@@ -28,6 +29,7 @@ Both scripts include the following features:
 - Optional installation of Docker Registry Mirror (Port 8001)
 - Optional installation of Pi-hole (Port 8002, DNS 53)
 - Optional installation of Gitea (Port 8003)
+- Automatic GitHub release synchronization for mirrored repositories
 - UFW configured to allow required service ports
 - Integration with fail2ban for enhanced security
 
@@ -42,9 +44,9 @@ Both scripts include the following features:
 ## Usage
 
 ### Server Setup
-Quick: (Edit Username)
+Quick: (Edit Username and add GitHub token)
 ```bash
-wget -O server.sh https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/server.sh && chmod +x server.sh && ./server.sh --install-apt-cache --install-docker-mirror --install-pihole --install-git-cache --github-user YourGitHubUsername
+wget -O server.sh https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/server.sh && chmod +x server.sh && ./server.sh --install-apt-cache --install-docker-mirror --install-pihole --install-git-cache --github-user YourGitHubUsername --github-token YourGitHubToken
 ```
 Manual:
 ```bash
@@ -59,14 +61,15 @@ Options:
 - `--install-pihole`: Install Pi-hole
 - `--install-git-cache`: Install Gitea (Git server)
 - `--github-user USERNAME`: Specify the GitHub username for SSH key addition (required)
+- `--github-token TOKEN`: Specify the GitHub token for release synchronization (required)
 - `--timezone TIMEZONE`: Set the timezone (default: America/New_York)
 
 Examples:
 ```bash
-./server.sh --install-pihole --github-user YourGitHubUsername
+./server.sh --install-pihole --github-user YourGitHubUsername --github-token YourGitHubToken
 ```
 ```bash
-./server.sh --install-apt-cache --install-docker-mirror --install-pihole --install-git-cache --github-user YourGitHubUsername --timezone Europe/London
+./server.sh --install-apt-cache --install-docker-mirror --install-pihole --install-git-cache --github-user YourGitHubUsername --github-token YourGitHubToken --timezone Europe/London
 ```
 
 ### Client Setup
@@ -88,14 +91,6 @@ Options:
 - `--github-user USERNAME`: Specify the GitHub username for SSH key addition (required)
 - `--timezone TIMEZONE`: Set the timezone (default: America/New_York)
 
-Examples:
-```bash
-./client.sh --pihole-dns 192.168.4.11 --docker-mirror 192.168.5.32 --github-user YourGitHubUsername
-```
-```bash
-./client.sh --apt-cache 192.168.2.55 --docker-mirror 192.168.2.55 --pihole-dns 192.168.2.55 --github-user YourGitHubUsername --timezone Europe/London
-```
-
 ## Port Configuration
 
 ### Server Ports
@@ -115,7 +110,9 @@ Examples:
 
 ## Logging
 
-Both scripts log their actions to `/var/log/server_setup.log` or `/var/log/client_setup.log` respectively.
+Both scripts log their actions:
+- Server script: `/var/log/server_setup.log`
+- Client script: `/var/log/client_setup.log`
 
 ## Security Considerations
 
@@ -124,6 +121,7 @@ Both scripts log their actions to `/var/log/server_setup.log` or `/var/log/clien
 - SSH password authentication is disabled
 - fail2ban is integrated with UFW for additional protection
 - GitHub SSH keys are required for authentication
+- GitHub token is required for release synchronization
 - If the server dies, clients lose connectivity. Consider running it in HA if you have multiple servers
 
 ## Post installation
@@ -146,3 +144,13 @@ After installation:
    - Choose "GitHub"
    - Enter the repository URL
    - Configure mirroring options as needed
+
+### Release Synchronization
+
+The `release.py` script is automatically installed and configured by the server setup script. It:
+- Runs every 30 minutes via cron
+- Synchronizes releases from GitHub to Gitea for all mirrored repositories
+- Uses the provided GitHub token for authentication
+- Logs all activities to the sync log file
+- Handles rate limiting and retries automatically
+- Maintains release metadata including descriptions, tags, and prerelease status
