@@ -67,7 +67,7 @@ show_help() {
     echo "  --timezone TIMEZONE       Set the timezone (default: America/New_York)"
     echo
     echo "Example:"
-    echo "  $0 --install-apt-cache --install-docker-mirror --install-pihole --install-git-cache --github-user YourGitHubUsername --timezone Europe/London"
+    echo "  $0 --install-apt-cache --install-docker-mirror --install-pihole --install-git-cache --github-user YourGitHubUsername"
 }
 
 parse_arguments() {

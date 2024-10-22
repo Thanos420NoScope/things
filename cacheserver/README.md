@@ -90,7 +90,7 @@ Options:
 
 Examples:
 ```bash
-./client.sh --pihole-dns 192.168.2.31 --docker-mirror 192.168.2.55 --github-user YourGitHubUsername
+./client.sh --pihole-dns 192.168.4.11 --docker-mirror 192.168.5.32 --github-user YourGitHubUsername
 ```
 ```bash
 ./client.sh --apt-cache 192.168.2.55 --docker-mirror 192.168.2.55 --pihole-dns 192.168.2.55 --github-user YourGitHubUsername --timezone Europe/London
@@ -147,22 +147,3 @@ After installation:
    - Choose "GitHub"
    - Enter the repository URL
    - Configure mirroring options as needed
-
-## Testing
-
-A test script is provided to verify the setup of the server. To use it:
-
-1. Download the test script:
-   ```bash
-   wget -O test_server.sh https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/test_server.sh
-   ```
-
-2. Make it executable:
-   ```bash
-   chmod +x test_server.sh
-   ```
-
-3. Run the test script:
-   ```bash
-   sudo ./test_server.sh
-   ```
