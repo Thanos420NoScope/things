@@ -52,6 +52,7 @@ class GiteaReleaseSync:
         # Initialize state file path
         self.state_file = Path.home() / '.gitea_sync_state.json'
         self.sync_state = self._load_sync_state()
+        self.force_sync = False
         
         if not github_token:
             self.logger.error("GitHub token is required")
@@ -354,7 +355,6 @@ class GiteaReleaseSync:
         """Sync releases and their assets from GitHub to local Gitea"""
         try:
             repo_key = f"{github_owner}/{github_repo}"
-            last_sync = self.sync_state['repos'].get(repo_key, {}).get('last_sync')
             
             # Get all releases with pagination
             github_releases_url = f"https://api.github.com/repos/{github_owner}/{github_repo}/releases"
@@ -370,42 +370,7 @@ class GiteaReleaseSync:
                 
             self.logger.info(f"Found {len(github_releases)} releases on GitHub")
 
-            # Sort releases by published date
-            github_releases.sort(
-                key=lambda x: datetime.fromisoformat(x.get('published_at', '').replace('Z', '+00:00')),
-                reverse=True
-            )
-
-            # If we have a last sync time, filter to only newer releases
-            new_releases = []
-            if last_sync and not getattr(self, 'force_sync', False):
-                last_sync_time = datetime.fromisoformat(last_sync.replace('Z', '+00:00'))
-                for release in github_releases:
-                    try:
-                        published_at = datetime.fromisoformat(release['published_at'].replace('Z', '+00:00'))
-                        if published_at > last_sync_time:
-                            new_releases.append(release)
-                        else:
-                            # Check if this release has all its assets
-                            release_id = release.get('id')
-                            if release_id:
-                                release_complete = self._check_release_completeness(
-                                    release_id,
-                                    gitea_owner,
-                                    gitea_repo,
-                                    len(release.get('assets', []))
-                                )
-                                if not release_complete:
-                                    new_releases.append(release)
-                    except (KeyError, ValueError) as e:
-                        self.logger.warning(f"Error processing release date, including release: {e}")
-                        new_releases.append(release)
-                
-                github_releases = new_releases
-                self.logger.info(f"Found {len(github_releases)} releases to process")
-            else:
-                self.logger.info("Processing all releases due to no sync state or force sync")
-
+            # Get existing Gitea releases first
             gitea_releases_url = f"{self.gitea_url}/api/v1/repos/{gitea_owner}/{gitea_repo}/releases"
             gitea_response = requests.get(
                 gitea_releases_url,
@@ -420,7 +385,68 @@ class GiteaReleaseSync:
                 for release in gitea_response.json()
             }
 
+            # Sort releases by published date
+            github_releases.sort(
+                key=lambda x: datetime.fromisoformat(x.get('published_at', '').replace('Z', '+00:00')),
+                reverse=True
+            )
+
+            # Get last sync time
+            last_sync = self.sync_state['repos'].get(repo_key, {}).get('last_sync')
+
+            # Determine which releases to process
+            releases_to_process = []
             for release in github_releases:
+                try:
+                    tag_name = release['tag_name']
+                    
+                    # Always include if it doesn't exist in Gitea
+                    if tag_name not in existing_releases:
+                        self.logger.info(f"Release {tag_name} not found in Gitea, will create")
+                        releases_to_process.append(release)
+                        continue
+
+                    # Check if we need to process this release
+                    if last_sync and not self.force_sync:
+                        try:
+                            published_at = datetime.fromisoformat(release['published_at'].replace('Z', '+00:00'))
+                            last_sync_time = datetime.fromisoformat(last_sync.replace('Z', '+00:00'))
+                            
+                            if published_at > last_sync_time:
+                                self.logger.info(f"Release {tag_name} is newer than last sync, will process")
+                                releases_to_process.append(release)
+                                continue
+                        except (KeyError, ValueError) as e:
+                            self.logger.warning(f"Error processing dates for release {tag_name}: {e}, including for processing")
+                            releases_to_process.append(release)
+                            continue
+                    
+                    # If forcing sync or first run
+                    if self.force_sync or not last_sync:
+                        releases_to_process.append(release)
+                        continue
+                    
+                    # Check for missing assets
+                    release_id = existing_releases[tag_name]['id']
+                    expected_assets = len(release.get('assets', []))
+                    if expected_assets > 0:
+                        release_complete = self._check_release_completeness(
+                            release_id,
+                            gitea_owner,
+                            gitea_repo,
+                            expected_assets
+                        )
+                        if not release_complete:
+                            self.logger.info(f"Release {tag_name} has missing assets, will process")
+                            releases_to_process.append(release)
+                            
+                except Exception as e:
+                    self.logger.error(f"Error checking release {release.get('tag_name', 'unknown')}: {e}")
+                    releases_to_process.append(release)
+
+            self.logger.info(f"Processing {len(releases_to_process)} releases")
+
+            for release in releases_to_process:
                 try:
                     tag_name = release['tag_name']
                     
