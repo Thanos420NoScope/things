@@ -344,6 +344,8 @@ install_git_cache() {
 
     # Create necessary directories
     mkdir -p /var/lib/gitea/{custom,data,log,repos}
+    mkdir -p $GIT_CACHE_DIR
+    chown -R gitea:gitea $GIT_CACHE_DIR
     chown -R gitea:gitea /var/lib/gitea
     chmod -R 750 /var/lib/gitea
     mkdir -p /etc/gitea
@@ -657,7 +659,7 @@ setup_release_script() {
     chmod +x /root/release.py || handle_error "Failed to make release script executable"
     
     # Add cron job
-    (crontab -l 2>/dev/null; echo "*/30 * * * * /root/release.py $GITHUB_TOKEN") | crontab - || handle_error "Failed to add cron job"
+    (crontab -l 2>/dev/null; echo "*/30 * * * * cd /root && python3 release.py -t $GITHUB_TOKEN") | crontab - || handle_error "Failed to add cron job"
     
     log_message "INFO" "Release script setup completed"
 }
