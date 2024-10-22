@@ -45,6 +45,8 @@ def setup_logging() -> logging.Logger:
     sys.exit(1)
 
 class GiteaReleaseSync:
+    MAX_RELEASES_TO_SYNC = 5
+
     def __init__(self, github_token: str):
         self.logger = logging.getLogger(__name__)
         self.logger.info("Initializing GiteaReleaseSync")
@@ -223,61 +225,38 @@ class GiteaReleaseSync:
             return None
 
     def github_request(self, url: str, params: Dict = None) -> requests.Response:
-        """Make a request to GitHub API with rate limit handling and pagination"""
+        """Make a request to GitHub API with rate limit handling"""
         max_retries = 3
         retry_delay = 60
-        all_data = []
         
-        while url:
-            for attempt in range(max_retries):
-                try:
-                    response = requests.get(
-                        url,
-                        headers=self.headers_github,
-                        params=params,
-                        timeout=30
-                    )
-                    
-                    if response.status_code == 403 and 'X-RateLimit-Remaining' in response.headers:
-                        remaining = int(response.headers['X-RateLimit-Remaining'])
-                        if remaining == 0:
-                            reset_time = int(response.headers['X-RateLimit-Reset'])
-                            wait_time = max(reset_time - time.time(), 0)
-                            self.logger.warning(f"Rate limited. Waiting {wait_time} seconds...")
-                            time.sleep(wait_time + 1)
-                            continue
-                            
-                    response.raise_for_status()
-                    
-                    # Handle pagination
-                    if isinstance(response.json(), list):
-                        all_data.extend(response.json())
-                    else:
-                        return response
-                    
-                    # Check for next page
-                    if 'Link' in response.headers:
-                        links = requests.utils.parse_header_links(response.headers['Link'])
-                        next_link = next((link for link in links if link['rel'] == 'next'), None)
-                        url = next_link['url'] if next_link else None
-                    else:
-                        url = None
-                    
-                    break
-                    
-                except requests.exceptions.RequestException as e:
-                    if attempt < max_retries - 1:
-                        self.logger.warning(f"Attempt {attempt + 1} failed, retrying in {retry_delay} seconds...")
-                        time.sleep(retry_delay)
-                    else:
-                        self.logger.error(f"GitHub API request failed for {url}: {e}")
-                        raise
-        
-        # Create a Response-like object with the accumulated data
-        final_response = requests.Response()
-        final_response._content = json.dumps(all_data).encode('utf-8')
-        final_response.status_code = 200
-        return final_response
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(
+                    url,
+                    headers=self.headers_github,
+                    params=params,
+                    timeout=30
+                )
+                
+                if response.status_code == 403 and 'X-RateLimit-Remaining' in response.headers:
+                    remaining = int(response.headers['X-RateLimit-Remaining'])
+                    if remaining == 0:
+                        reset_time = int(response.headers['X-RateLimit-Reset'])
+                        wait_time = max(reset_time - time.time(), 0)
+                        self.logger.warning(f"Rate limited. Waiting {wait_time} seconds...")
+                        time.sleep(wait_time + 1)
+                        continue
+                        
+                response.raise_for_status()
+                return response
+                
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    self.logger.warning(f"Attempt {attempt + 1} failed, retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                else:
+                    self.logger.error(f"GitHub API request failed for {url}: {e}")
+                    raise
 
     def download_asset(self, url: str, headers: Dict) -> Optional[tuple]:
         """Download a release asset to a temporary file"""
@@ -346,22 +325,23 @@ class GiteaReleaseSync:
             )
             response.raise_for_status()
             actual_assets = len(response.json())
-            return actual_assets == expected_assets
+            return actual_assets >= expected_assets
         except Exception as e:
             self.logger.warning(f"Error checking release completeness: {e}")
             return False
 
+    def get_normalized_tag(self, tag_name: str) -> str:
+        """Normalize tag name for comparison"""
+        return tag_name.lower().strip()
+
     def sync_releases(self, github_owner: str, github_repo: str, gitea_owner: str, gitea_repo: str) -> None:
         """Sync releases and their assets from GitHub to local Gitea"""
         try:
-            repo_key = f"{github_owner}/{github_repo}"
-            
-            # Get all releases with pagination
+            # Get all GitHub releases
             github_releases_url = f"https://api.github.com/repos/{github_owner}/{github_repo}/releases"
             self.logger.info(f"Fetching GitHub releases from: {github_releases_url}")
             
-            # Set per_page parameter to maximum allowed (100)
-            github_response = self.github_request(github_releases_url, params={'per_page': 100})
+            github_response = self.github_request(github_releases_url)
             github_releases = github_response.json()
             
             if not isinstance(github_releases, list):
@@ -370,7 +350,15 @@ class GiteaReleaseSync:
                 
             self.logger.info(f"Found {len(github_releases)} releases on GitHub")
 
-            # Get existing Gitea releases first
+            # Sort releases by published date and take only the latest MAX_RELEASES_TO_SYNC
+            github_releases.sort(
+                key=lambda x: x.get('published_at', ''),
+                reverse=True
+            )
+            github_releases = github_releases[:self.MAX_RELEASES_TO_SYNC]
+            self.logger.info(f"Processing the {self.MAX_RELEASES_TO_SYNC} most recent releases")
+
+            # Get existing Gitea releases
             gitea_releases_url = f"{self.gitea_url}/api/v1/repos/{gitea_owner}/{gitea_repo}/releases"
             gitea_response = requests.get(
                 gitea_releases_url,
@@ -380,77 +368,18 @@ class GiteaReleaseSync:
             )
             gitea_response.raise_for_status()
             
+            # Create map of existing releases with normalized tags
             existing_releases = {
-                release['tag_name']: release
+                self.get_normalized_tag(release['tag_name']): release
                 for release in gitea_response.json()
             }
 
-            # Sort releases by published date
-            github_releases.sort(
-                key=lambda x: datetime.fromisoformat(x.get('published_at', '').replace('Z', '+00:00')),
-                reverse=True
-            )
-
-            # Get last sync time
-            last_sync = self.sync_state['repos'].get(repo_key, {}).get('last_sync')
-
-            # Determine which releases to process
-            releases_to_process = []
             for release in github_releases:
                 try:
                     tag_name = release['tag_name']
+                    normalized_tag = self.get_normalized_tag(tag_name)
                     
-                    # Always include if it doesn't exist in Gitea
-                    if tag_name not in existing_releases:
-                        self.logger.info(f"Release {tag_name} not found in Gitea, will create")
-                        releases_to_process.append(release)
-                        continue
-
-                    # Check if we need to process this release
-                    if last_sync and not self.force_sync:
-                        try:
-                            published_at = datetime.fromisoformat(release['published_at'].replace('Z', '+00:00'))
-                            last_sync_time = datetime.fromisoformat(last_sync.replace('Z', '+00:00'))
-                            
-                            if published_at > last_sync_time:
-                                self.logger.info(f"Release {tag_name} is newer than last sync, will process")
-                                releases_to_process.append(release)
-                                continue
-                        except (KeyError, ValueError) as e:
-                            self.logger.warning(f"Error processing dates for release {tag_name}: {e}, including for processing")
-                            releases_to_process.append(release)
-                            continue
-                    
-                    # If forcing sync or first run
-                    if self.force_sync or not last_sync:
-                        releases_to_process.append(release)
-                        continue
-                    
-                    # Check for missing assets
-                    release_id = existing_releases[tag_name]['id']
-                    expected_assets = len(release.get('assets', []))
-                    if expected_assets > 0:
-                        release_complete = self._check_release_completeness(
-                            release_id,
-                            gitea_owner,
-                            gitea_repo,
-                            expected_assets
-                        )
-                        if not release_complete:
-                            self.logger.info(f"Release {tag_name} has missing assets, will process")
-                            releases_to_process.append(release)
-                            
-                except Exception as e:
-                    self.logger.error(f"Error checking release {release.get('tag_name', 'unknown')}: {e}")
-                    releases_to_process.append(release)
-
-            self.logger.info(f"Processing {len(releases_to_process)} releases")
-
-            for release in releases_to_process:
-                try:
-                    tag_name = release['tag_name']
-                    
-                    if tag_name not in existing_releases:
+                    if normalized_tag not in existing_releases:
                         self.logger.info(f"Creating release {tag_name}")
                         
                         release_data = {
@@ -472,11 +401,15 @@ class GiteaReleaseSync:
                         create_response.raise_for_status()
                         release_id = create_response.json()['id']
                         self.logger.info(f"Created release {tag_name}")
+                        
+                        # Add to existing releases map
+                        existing_releases[normalized_tag] = create_response.json()
                     else:
-                        release_id = existing_releases[tag_name]['id']
+                        release_id = existing_releases[normalized_tag]['id']
+                        self.logger.info(f"Found existing release {tag_name}")
 
                     if release.get('assets'):
-                        self.logger.info(f"Syncing {len(release['assets'])} assets for release {tag_name}")
+                        self.logger.info(f"Checking {len(release['assets'])} assets for release {tag_name}")
                         
                         existing_assets_response = requests.get(
                             f"{self.gitea_url}/api/v1/repos/{gitea_owner}/{gitea_repo}/releases/{release_id}/assets",
@@ -485,11 +418,13 @@ class GiteaReleaseSync:
                             verify=False
                         )
                         existing_assets = {
-                            asset['name'] for asset in existing_assets_response.json()
+                            asset['name'].lower(): asset 
+                            for asset in existing_assets_response.json()
                         }
 
                         for asset in release['assets']:
-                            if asset['name'] in existing_assets:
+                            asset_name = asset['name'].lower()
+                            if asset_name in existing_assets:
                                 self.logger.debug(f"Asset {asset['name']} already exists, skipping")
                                 continue
                                 
@@ -507,10 +442,11 @@ class GiteaReleaseSync:
                                     self.logger.error(f"Failed to upload asset: {filename}")
                 
                 except Exception as e:
-                    self.logger.error(f"Failed to process release {release['tag_name']}: {e}")
+                    self.logger.error(f"Failed to process release {release.get('tag_name', 'unknown')}: {e}")
                     continue
 
             # Update sync state for this repository
+            repo_key = f"{github_owner}/{github_repo}"
             if not self.sync_state['repos'].get(repo_key):
                 self.sync_state['repos'][repo_key] = {}
             self.sync_state['repos'][repo_key]['last_sync'] = datetime.now(timezone.utc).isoformat()
