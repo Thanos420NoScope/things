@@ -7,6 +7,8 @@ import re
 import time
 import argparse
 import sys
+import urllib.parse
+import socket
 from typing import Optional, Dict, List, Set
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -15,6 +17,19 @@ import urllib3
 
 # Disable SSL verification warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+def get_local_ip():
+    """Get the local IP address of the machine."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # We don't actually connect to this address, it's just to get the local IP
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        return local_ip
+    except Exception as e:
+        print(f"Error getting local IP: {e}")
+        return "127.0.0.1"
 
 def setup_logging() -> logging.Logger:
     """Setup logging with fallback to current directory if default path is not writable"""
@@ -61,6 +76,7 @@ class GiteaReleaseSync:
             raise ValueError("GitHub token is required")
             
         self.gitea_url = "http://127.0.0.1:8003"
+        self.local_ip = get_local_ip()
         self.github_token = github_token
         
         # Test Gitea connectivity
@@ -95,7 +111,6 @@ class GiteaReleaseSync:
             'Accept': 'application/vnd.github.v3+json',
             'Authorization': f'token {self.github_token}'
         }
-
     def _load_sync_state(self) -> Dict:
         """Load the sync state from file"""
         try:
@@ -269,12 +284,39 @@ class GiteaReleaseSync:
             )
             response.raise_for_status()
             
-            content_disposition = response.headers.get('content-disposition')
-            if content_disposition and 'filename=' in content_disposition:
-                filename = re.findall("filename=(.+)", content_disposition)[0].strip('"')
-            else:
-                filename = url.split('/')[-1]
+            content_disposition = response.headers.get('content-disposition', '')
+            filename = None
+            
+            if content_disposition:
+                cd_params = {}
+                for param in content_disposition.split(';'):
+                    param = param.strip()
+                    if '=' in param:
+                        key, value = param.split('=', 1)
+                        cd_params[key.lower()] = value.strip('"\'')
                 
+                filename = cd_params.get('filename*', None)
+                if filename and filename.startswith("UTF-8''"):
+                    filename = urllib.parse.unquote(filename[7:])
+                else:
+                    filename = cd_params.get('filename', None)
+            
+            if not filename:
+                filename = os.path.basename(url.split('?')[0])
+                try:
+                    parsed_url = urllib.parse.urlparse(url)
+                    query_params = urllib.parse.parse_qs(parsed_url.query)
+                    if 'filename' in query_params:
+                        filename = query_params['filename'][0]
+                except:
+                    pass
+            
+            if not filename or filename.strip() == '':
+                filename = 'download'
+                
+            filename = urllib.parse.unquote(filename)
+            filename = re.sub(r'[^\w\-\. ]', '_', filename)
+            
             temp_file = NamedTemporaryFile(delete=False)
             
             for chunk in response.iter_content(chunk_size=8192):
@@ -289,22 +331,77 @@ class GiteaReleaseSync:
             return None
 
     def upload_asset(self, release_id: int, temp_path: str, filename: str, gitea_owner: str, gitea_repo: str) -> bool:
-        """Upload an asset to a Gitea release"""
+        """Upload an asset to a Gitea release and store filename mapping"""
         try:
             upload_url = f"{self.gitea_url}/api/v1/repos/{gitea_owner}/{gitea_repo}/releases/{release_id}/assets"
-            
+
             with open(temp_path, 'rb') as f:
-                files = {'attachment': (filename, f)}
+                files = {
+                    'attachment': (
+                        filename,
+                        f,
+                        'application/octet-stream'
+                    )
+                }
+                headers = {'Authorization': f'token {self.gitea_token}'}
+            
                 response = requests.post(
                     upload_url,
-                    headers={'Authorization': f'token {self.gitea_token}'},
+                    headers=headers,
                     files=files,
                     timeout=60,
                     verify=False
                 )
                 response.raise_for_status()
-                return True
+            
+                asset_info = response.json()
+                asset_id = asset_info.get('id')
+            
+                # Get current release info
+                release_info = requests.get(
+                    f"{self.gitea_url}/api/v1/repos/{gitea_owner}/{gitea_repo}/releases/{release_id}",
+                    headers=self.headers_gitea,
+                    timeout=30,
+                    verify=False
+                ).json()
+            
+                current_body = release_info.get('body', '')
                 
+                # Remove old download links section if it exists
+                current_body = re.sub(r'⚠️ \*\*IMPORTANT: Use These Download Links\*\* ⚠️.*?⚠️ \*\*Please ignore any download links below this section\*\* ⚠️', '', current_body, flags=re.DOTALL)
+            
+                # Get all assets for this release
+                assets_response = requests.get(
+                    f"{self.gitea_url}/api/v1/repos/{gitea_owner}/{gitea_repo}/releases/{release_id}/assets",
+                    headers=self.headers_gitea,
+                    timeout=30,
+                    verify=False
+                )
+                assets = assets_response.json()
+                
+                # Create new download links section at the top using local_ip
+                download_links = "⚠️ **IMPORTANT: Use These Local download links** ⚠️\n\n"
+                for asset in assets:
+                    asset_name = asset['name']
+                    download_url = f"http://{self.local_ip}:8003/{gitea_owner}/{gitea_repo}/releases/download/{release_info['tag_name']}/{asset_name}"
+                    download_links += f"- {asset_name}\n  ```bash\n  {download_url}\n  ```\n"
+                download_links += "\n⚠️ **Ignore any download links below this section** ⚠️\n\n"
+                
+                # Combine the sections
+                updated_body = download_links + current_body.strip()
+            
+                # Update release body
+                update_data = {'body': updated_body}
+                requests.patch(
+                    f"{self.gitea_url}/api/v1/repos/{gitea_owner}/{gitea_repo}/releases/{release_id}",
+                    headers=self.headers_gitea,
+                    json=update_data,
+                    timeout=30,
+                    verify=False
+                )
+            
+                return True
+            
         except Exception as e:
             self.logger.error(f"Failed to upload asset {filename}: {e}")
             return False
