@@ -1,12 +1,12 @@
 # Cache Server
 
-This project contains two scripts designed to automate the setup and configuration of cache servers and client machines for bandwidth effficiency.  
-It is recommended to run those only on fresh proxmox containers. Scripts have not been tested in VMs and baremetal.
+This project contains two scripts designed to automate the setup and configuration of cache servers and client machines for bandwidth efficiency and enhanced security.  
+It is recommended to run these only on fresh proxmox containers. Scripts have not been tested in VMs and baremetal.
 
 ## Scripts
 
-1. `server.sh`: Configures a server with hardened configuration and various caching tools.
-2. `client.sh`: Configures a client with hardened configuration using the cache server.
+1. `server.sh`: Configures a server with hardened configuration, UFW firewall, and various caching tools.
+2. `client.sh`: Configures a client with hardened configuration and UFW firewall using the cache server.
 
 ## Features
 
@@ -15,31 +15,36 @@ Both scripts include the following features:
 - System update and upgrade
 - Installation of essential tools (Docker, Git, Python, etc.)
 - SSH configuration (disabling password authentication)
+- UFW firewall configuration with secure defaults
 - GitHub key addition from a specified GitHub username
-- Fail2ban setup
+- Fail2ban setup (integrated with UFW)
 - Automatic security updates
-- Timezone setting (America/New_York)
+- Configurable timezone setting (default: America/New_York)
 - System optimization
-
 
 ### Server-specific features
 
-- Optional installation of APT-Cacher NG
-- Optional installation of Docker Registry Mirror
-- Optional installation of Pi-hole
+- Optional installation of APT-Cacher NG (Port 8000)
+- Optional installation of Docker Registry Mirror (Port 8001)
+- Optional installation of Pi-hole (Port 8002, DNS 53)
+- Optional installation of Gitea (Port 8003)
+- UFW configured to allow required service ports
+- Integration with fail2ban for enhanced security
 
 ### Client-specific features
 
 - Optional configuration of APT cache server
 - Optional configuration of Docker registry mirror
 - Optional configuration of Pi-hole DNS server
+- UFW configured for secure outbound access to services
+- Default deny incoming, allow outgoing policy
 
 ## Usage
 
 ### Server Setup
 Quick: (Edit Username)
 ```bash
-wget -O server.sh https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/server.sh && chmod +x server.sh && ./server.sh --install-apt-cache --install-docker-mirror --install-pihole --github-user YourGitHubUsername
+wget -O server.sh https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/server.sh && chmod +x server.sh && ./server.sh --install-apt-cache --install-docker-mirror --install-pihole --install-git-cache --github-user YourGitHubUsername
 ```
 Manual:
 ```bash
@@ -52,20 +57,22 @@ Options:
 - `--install-apt-cache`: Install APT-Cacher NG
 - `--install-docker-mirror`: Install Docker Registry Mirror
 - `--install-pihole`: Install Pi-hole
+- `--install-git-cache`: Install Gitea (Git server)
 - `--github-user USERNAME`: Specify the GitHub username for SSH key addition (required)
+- `--timezone TIMEZONE`: Set the timezone (default: America/New_York)
 
 Examples:
 ```bash
 ./server.sh --install-pihole --github-user YourGitHubUsername
 ```
 ```bash
-./server.sh --install-apt-cache --install-docker-mirror --install-pihole --github-user YourGitHubUsername
+./server.sh --install-apt-cache --install-docker-mirror --install-pihole --install-git-cache --github-user YourGitHubUsername --timezone Europe/London
 ```
 
 ### Client Setup
 Quick: (Edit IPs and Username)
 ```bash
-wget -O client.sh https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/client.sh && chmod +x client.sh && ./client.sh --apt-cache 192.168.2.55 --docker-mirror 192.168.2.55:5000 --pihole-dns 192.168.2.55 --github-user YourGitHubUsername
+wget -O client.sh https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/client.sh && chmod +x client.sh && ./client.sh --apt-cache 192.168.2.55 --docker-mirror 192.168.2.55 --pihole-dns 192.168.2.55 --github-user YourGitHubUsername
 ```
 Manual:
 ```bash
@@ -79,14 +86,33 @@ Options:
 - `--docker-mirror SERVER`: Use specified Docker registry mirror
 - `--pihole-dns SERVER`: Use specified Pi-hole DNS server
 - `--github-user USERNAME`: Specify the GitHub username for SSH key addition (required)
+- `--timezone TIMEZONE`: Set the timezone (default: America/New_York)
 
 Examples:
 ```bash
-./client.sh --pihole-dns 192.168.2.31 --docker-mirror 192.168.2.55:5000 --github-user YourGitHubUsername
+./client.sh --pihole-dns 192.168.2.31 --docker-mirror 192.168.2.55 --github-user YourGitHubUsername
 ```
 ```bash
-./client.sh --apt-cache 192.168.2.55 --docker-mirror 192.168.2.55:5000 --pihole-dns 192.168.2.55 --github-user YourGitHubUsername
+./client.sh --apt-cache 192.168.2.55 --docker-mirror 192.168.2.55 --pihole-dns 192.168.2.55 --github-user YourGitHubUsername --timezone Europe/London
 ```
+
+## Port Configuration
+
+### Server Ports
+- SSH: 22/tcp
+- APT-Cacher NG: 8000/tcp
+- Docker Registry Mirror: 8001/tcp
+- Pi-hole Web Interface: 8002/tcp
+- Pi-hole DNS: 53/tcp, 53/udp
+- Gitea: 8003/tcp
+- HTTP/HTTPS: 80/tcp, 443/tcp (if needed)
+
+### Client Firewall
+- Allows SSH (22/tcp) in/out
+- Allows outbound access to configured services
+- Denies all incoming by default
+- Allows all outbound by default
+- Allows established connections
 
 ## Logging
 
@@ -94,12 +120,49 @@ Both scripts log their actions to `/var/log/server_setup.log` or `/var/log/clien
 
 ## Security Considerations
 
-- The scripts must be run as root.
-- The scripts disable password authentication and add ssh keys from the specified GitHub user, make sure to provide a GitHub username with valid authentication keys.
-- If the server dies, clients lose connectivity. Consider running it in HA if you have multiple servers.
+- The scripts must be run as root
+- UFW is configured with secure defaults (deny incoming, allow outgoing)
+- SSH password authentication is disabled
+- fail2ban is integrated with UFW for additional protection
+- GitHub SSH keys are required for authentication
+- If the server dies, clients lose connectivity. Consider running it in HA if you have multiple servers
 
 ## Post installation
 
 - Docker cache: /var/lib/docker-registry
-- PiHole stats: http://192.168.2.55/admin/index.php
-- APT-NG stats: http://192.168.2.55:3142/acng-report.html?doCount=Count+Data
+- PiHole admin interface: http://SERVER_IP:8002/admin
+- APT-Cacher NG statistics: http://SERVER_IP:8000/acng-report.html
+- Gitea web interface: http://SERVER_IP:8003
+
+### Using Gitea
+
+After installation:
+1. Access the Gitea web interface at http://SERVER_IP:8003
+2. Log in with default credentials:
+   - Username: root
+   - Password: password
+3. To mirror a repository:
+   - Click the "+" button at the top right
+   - Select "New Migration"
+   - Choose "GitHub"
+   - Enter the repository URL
+   - Configure mirroring options as needed
+
+## Testing
+
+A test script is provided to verify the setup of the server. To use it:
+
+1. Download the test script:
+   ```bash
+   wget -O test_server.sh https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/test_server.sh
+   ```
+
+2. Make it executable:
+   ```bash
+   chmod +x test_server.sh
+   ```
+
+3. Run the test script:
+   ```bash
+   sudo ./test_server.sh
+   ```
