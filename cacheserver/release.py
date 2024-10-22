@@ -334,7 +334,7 @@ class GiteaReleaseSync:
         """Upload an asset to a Gitea release and store filename mapping"""
         try:
             upload_url = f"{self.gitea_url}/api/v1/repos/{gitea_owner}/{gitea_repo}/releases/{release_id}/assets"
-
+        
             with open(temp_path, 'rb') as f:
                 files = {
                     'attachment': (
@@ -353,7 +353,7 @@ class GiteaReleaseSync:
                     verify=False
                 )
                 response.raise_for_status()
-            
+
                 asset_info = response.json()
                 asset_id = asset_info.get('id')
             
@@ -368,7 +368,7 @@ class GiteaReleaseSync:
                 current_body = release_info.get('body', '')
                 
                 # Remove old download links section if it exists
-                current_body = re.sub(r'⚠️ \*\*IMPORTANT: Use These Download Links\*\* ⚠️.*?⚠️ \*\*Please ignore any download links below this section\*\* ⚠️', '', current_body, flags=re.DOTALL)
+                current_body = re.sub(r'⚠️ \*\*IMPORTANT: Use These Download Links\*\* ⚠️.*?⚠️ \*\*Ignore any download links below this section\*\* ⚠️', '', current_body, flags=re.DOTALL)
             
                 # Get all assets for this release
                 assets_response = requests.get(
@@ -379,8 +379,8 @@ class GiteaReleaseSync:
                 )
                 assets = assets_response.json()
                 
-                # Create new download links section at the top using local_ip
-                download_links = "⚠️ **IMPORTANT: Use These Local download links** ⚠️\n\n"
+                # Create new download links section at the top
+                download_links = "⚠️ **IMPORTANT: Use These Download Links** ⚠️\n\n"
                 for asset in assets:
                     asset_name = asset['name']
                     download_url = f"http://{self.local_ip}:8003/{gitea_owner}/{gitea_repo}/releases/download/{release_info['tag_name']}/{asset_name}"
@@ -498,7 +498,7 @@ class GiteaReleaseSync:
                         create_response.raise_for_status()
                         release_id = create_response.json()['id']
                         self.logger.info(f"Created release {tag_name}")
-                        
+
                         # Add to existing releases map
                         existing_releases[normalized_tag] = create_response.json()
                     else:
