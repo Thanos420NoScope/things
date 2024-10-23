@@ -353,23 +353,43 @@ class GiteaReleaseSync:
         # Convert filename to lowercase for case-insensitive matching
         filename_lower = filename.lower()
         
-        # Files to exclude
+        # Files to exclude - more comprehensive list
         exclude_patterns = [
             '.md5', 
-            '.sha', 
+            '.sha',
+            'sha256',
+            'sha512',
+            'checksums',
+            'sum',
+            '.asc',
+            '.sig',
             'arm64',
             'aarch64',
             'osx',
             'darwin',
             'macos',
-            'freebsd',
-            'SHA256SUMS',
-            'checksums'
+            'freebsd'
         ]
         
+        # First check exact matches for common checksum files
+        exact_exclude = {
+            'sha256sums',
+            'sha256sums.txt',
+            'sha256sums.asc',
+            'sha256sums.sig',
+            'checksums.txt',
+            'checksum.txt',
+            'hashes.txt'
+        }
+        
+        if filename_lower in exact_exclude:
+            return False
+            
+        # Then check pattern matches
         for pattern in exclude_patterns:
             if pattern in filename_lower:
                 return False
+                
         return True
 
     def _update_readme(self, owner: str, repo: str, releases: List[Dict]) -> bool:
@@ -402,11 +422,12 @@ class GiteaReleaseSync:
 
             # Parse existing content
             content_lines = current_readme['content'].split('\n')
-            
+        
             # Find existing section
             repo_section_start = -1
             repo_section_end = -1
             repo_header = f"## {owner}/{repo}"
+            
             for i, line in enumerate(content_lines):
                 if line.startswith(repo_header):
                     repo_section_start = i
@@ -443,9 +464,21 @@ class GiteaReleaseSync:
                 if content_lines and content_lines[-1].strip() != "":
                     content_lines.append("")
                 content_lines.extend(new_section)
+                needs_update = True
             else:
-                # Replace existing section
+                # Check if content is actually different before updating
+                existing_section = content_lines[repo_section_start:repo_section_end]
+                # Normalize both sections for comparison
+                existing_normalized = '\n'.join(existing_section).strip()
+                new_normalized = '\n'.join(new_section).strip()
+                
+                if existing_normalized == new_normalized:
+                    self.logger.info(f"No changes needed for {owner}/{repo} in README")
+                    return True
+                    
+                # Replace existing section only if different
                 content_lines[repo_section_start:repo_section_end] = new_section
+                needs_update = True
 
             # Clean up content
             content = '\n'.join(content_lines)
@@ -466,20 +499,30 @@ class GiteaReleaseSync:
                     current_section.append(line)
                     if line.strip().startswith('http://'):
                         has_downloads = True
-            
+        
             # Add last section if it has downloads
             if current_section and has_downloads:
                 final_lines.extend(current_section)
 
-            # Update README
+            # Compare final content with current content
             final_content = '\n'.join(final_lines).strip() + '\n'
+            
+            # Do byte-by-byte comparison of normalized content
+            current_normalized = current_readme['content'].strip().replace('\r\n', '\n')
+            final_normalized = final_content.strip().replace('\r\n', '\n')
+            
+            if current_normalized == final_normalized:
+                self.logger.info(f"No changes needed for README after normalization")
+                return True
+
+            # Only update if there are actual changes
             update_data = {
                 "content": base64.b64encode(final_content.encode('utf-8')).decode('utf-8'),
                 "message": f"Update release links for {owner}/{repo}",
                 "sha": current_readme['sha'],
                 "branch": "main"
             }
-            
+        
             response = requests.put(
                 f"{self.gitea_url}/api/v1/repos/{self.admin_user}/{self.RELEASES_REPO}/contents/README.md",
                 headers=self.headers_gitea,
@@ -487,8 +530,15 @@ class GiteaReleaseSync:
                 verify=False
             )
             response.raise_for_status()
+            self.logger.info(f"Successfully updated README with changes for {owner}/{repo}")
             return True
-            
+        
+        except Exception as e:
+            self.logger.error(f"Failed to update README: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                self.logger.error(f"Response content: {e.response.text}")
+            return False
+        
         except Exception as e:
             self.logger.error(f"Failed to update README: {e}")
             if hasattr(e, 'response') and e.response is not None:

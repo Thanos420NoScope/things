@@ -29,6 +29,8 @@ Both server and client scripts include the following features:
 - Optional installation of Docker Registry Mirror (Port 8001)
 - Optional installation of Pi-hole (Port 8002, DNS 53)
 - Optional installation of Gitea (Port 8003)
+- Optional installation of Go module proxy cache (Port 8004)
+- Optional installation of NPM registry cache (Port 8005)
 - Automatic GitHub release synchronization for mirrored repositories
   - Centralizes all release downloads in a single repository
   - Automatically syncs latest version downloads
@@ -42,6 +44,8 @@ Both server and client scripts include the following features:
 - Optional configuration of APT cache server
 - Optional configuration of Docker registry mirror
 - Optional configuration of Pi-hole DNS server
+- Optional configuration of Go module proxy cache
+- Optional configuration of NPM registry cache
 - UFW configured for secure outbound access to services
 - Default deny incoming, allow outgoing policy
 
@@ -50,7 +54,7 @@ Both server and client scripts include the following features:
 ### Server Setup
 Quick: (Edit Username and add GitHub token)
 ```bash
-wget -O server.sh https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/server.sh && chmod +x server.sh && ./server.sh --install-apt-cache --install-docker-mirror --install-pihole --install-git-cache --github-user YourGitHubUsername --github-token YourGitHubToken
+wget -O server.sh https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/server.sh && chmod +x server.sh && ./server.sh --install-apt-cache --install-docker-mirror --install-pihole --install-git-cache --install-go-cache --install-npm-cache --github-user YourGitHubUsername --github-token YourGitHubToken -y
 ```
 Manual:
 ```bash
@@ -64,22 +68,16 @@ Options:
 - `--install-docker-mirror`: Install Docker Registry Mirror
 - `--install-pihole`: Install Pi-hole
 - `--install-git-cache`: Install Gitea (Git server)
+- `--install-go-cache`: Install Go module proxy cache
+- `--install-npm-cache`: Install NPM registry cache
 - `--github-user USERNAME`: Specify the GitHub username for SSH key addition (required)
 - `--github-token TOKEN`: Specify the GitHub token for release synchronization (required)
 - `--timezone TIMEZONE`: Set the timezone (default: America/New_York)
 
-Examples:
-```bash
-./server.sh --install-pihole --github-user YourGitHubUsername --github-token YourGitHubToken
-```
-```bash
-./server.sh --install-apt-cache --install-docker-mirror --install-pihole --install-git-cache --github-user YourGitHubUsername --github-token YourGitHubToken --timezone Europe/London
-```
-
 ### Client Setup
 Quick: (Edit IPs and Username)
 ```bash
-wget -O client.sh https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/client.sh && chmod +x client.sh && ./client.sh --apt-cache 192.168.2.55 --docker-mirror 192.168.2.55 --pihole-dns 192.168.2.55 --github-user YourGitHubUsername
+wget -O client.sh https://raw.githubusercontent.com/Thanos420NoScope/things/refs/heads/main/cacheserver/client.sh && chmod +x client.sh && ./client.sh --apt-cache 192.168.2.55 --docker-mirror 192.168.2.55 --pihole-dns 192.168.2.55 --go-cache 192.168.2.55 --npm-cache 192.168.2.55 --github-user YourGitHubUsername -y
 ```
 Manual:
 ```bash
@@ -92,6 +90,8 @@ Options:
 - `--apt-cache SERVER`: Use specified APT cache server
 - `--docker-mirror SERVER`: Use specified Docker registry mirror
 - `--pihole-dns SERVER`: Use specified Pi-hole DNS server
+- `--go-cache SERVER`: Use specified Go module proxy cache
+- `--npm-cache SERVER`: Use specified NPM registry cache
 - `--github-user USERNAME`: Specify the GitHub username for SSH key addition (required)
 - `--timezone TIMEZONE`: Set the timezone (default: America/New_York)
 
@@ -104,6 +104,8 @@ Options:
 - Pi-hole Web Interface: 8002/tcp
 - Pi-hole DNS: 53/tcp, 53/udp
 - Gitea: 8003/tcp
+- Go Module Proxy: 8004/tcp
+- NPM Registry Cache: 8005/tcp
 
 ### Client Firewall
 - Allows SSH (22/tcp) in/out
@@ -134,6 +136,8 @@ Both scripts log their actions:
 - PiHole admin interface: http://SERVER_IP:8002/admin
 - APT-Cacher NG statistics: http://SERVER_IP:8000/acng-report.html
 - Gitea web interface: http://SERVER_IP:8003
+- Go module proxy: http://SERVER_IP:8004
+- NPM registry cache: http://SERVER_IP:8005
 
 ### Using Gitea
 

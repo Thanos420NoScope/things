@@ -11,9 +11,13 @@ SKIP_CONFIRM=false
 APT_CACHE=""
 DOCKER_MIRROR=""
 PIHOLE_DNS=""
+GO_CACHE=""
+NPM_CACHE=""
 GITHUB_USER=""
 APT_CACHE_PORT=8000
 DOCKER_MIRROR_PORT=8001
+GO_CACHE_PORT=8004
+NPM_CACHE_PORT=8005
 TIMEZONE="America/New_York"
 
 # Colors and formatting
@@ -58,11 +62,13 @@ show_help() {
     echo "  --apt-cache SERVER     Use specified APT cache server"
     echo "  --docker-mirror SERVER Use specified Docker registry mirror"
     echo "  --pihole-dns SERVER    Use specified Pi-hole DNS server"
+    echo "  --go-cache SERVER       Use specified Go module proxy cache"
+    echo "  --npm-cache SERVER      Use specified NPM registry cache"
     echo "  --github-user USERNAME Specify the GitHub username for SSH key addition (required)"
     echo "  --timezone TIMEZONE    Set the timezone (default: America/New_York)"
     echo
     echo "Example:"
-    echo "  $0 --apt-cache 192.168.2.55 --docker-mirror 192.168.2.55 --pihole-dns 192.168.2.55 --github-user YourGitHubUsername"
+    echo "  $0 --apt-cache 192.168.2.55 --docker-mirror 192.168.2.55 --pihole-dns 192.168.2.55 --go-cache 192.168.2.55 --npm-cache 192.168.2.55 --github-user YourGitHubUsername"
 }
 
 parse_arguments() {
@@ -86,6 +92,18 @@ parse_arguments() {
                 PIHOLE_DNS="$2"
                 if [ -z "$PIHOLE_DNS" ]; then
                     handle_error "Pi-hole DNS server cannot be empty"
+                fi
+                shift ;;
+            --go-cache)
+                GO_CACHE="$2"
+                if [ -z "$GO_CACHE" ]; then
+                    handle_error "Go cache server cannot be empty"
+                fi
+                shift ;;
+            --npm-cache)
+                NPM_CACHE="$2"
+                if [ -z "$NPM_CACHE" ]; then
+                    handle_error "NPM cache server cannot be empty"
                 fi
                 shift ;;
             --github-user) 
@@ -145,6 +163,8 @@ show_summary() {
     [ -n "$APT_CACHE" ] && echo -e "${GREEN}$CHECK_MARK${NC} Configure APT to use cache server: $APT_CACHE:$APT_CACHE_PORT" || echo -e "${RED}$CROSS_MARK${NC} No APT cache server will be configured"
     [ -n "$DOCKER_MIRROR" ] && echo -e "${GREEN}$CHECK_MARK${NC} Configure Docker to use registry mirror: $DOCKER_MIRROR:$DOCKER_MIRROR_PORT" || echo -e "${RED}$CROSS_MARK${NC} No Docker registry mirror will be configured"
     [ -n "$PIHOLE_DNS" ] && echo -e "${GREEN}$CHECK_MARK${NC} Configure system to use Pi-hole DNS server: $PIHOLE_DNS" || echo -e "${RED}$CROSS_MARK${NC} No custom DNS server will be configured"
+    [ -n "$GO_CACHE" ] && echo -e "${GREEN}$CHECK_MARK${NC} Configure Go to use module proxy: $GO_CACHE:$GO_CACHE_PORT" || echo -e "${RED}$CROSS_MARK${NC} No Go module proxy will be configured"
+    [ -n "$NPM_CACHE" ] && echo -e "${GREEN}$CHECK_MARK${NC} Configure NPM to use registry cache: $NPM_CACHE:$NPM_CACHE_PORT" || echo -e "${RED}$CROSS_MARK${NC} No NPM registry cache will be configured"
     echo -e "${GREEN}$CHECK_MARK${NC} Configure UFW firewall"
     echo -e "${GREEN}$CHECK_MARK${NC} Update and upgrade system packages"
     echo -e "${GREEN}$CHECK_MARK${NC} Install essential tools (Docker, Git, Python, etc.)"
@@ -258,6 +278,72 @@ EOF
         fi
     else
         log_message "INFO" "No Pi-hole DNS server specified, skipping configuration"
+    fi
+}
+
+configure_go_cache() {
+    if [ -n "$GO_CACHE" ]; then
+        log_message "INFO" "Configuring Go module proxy..."
+
+        # Install Go 1.23.2
+        log_message "INFO" "Downloading Go 1.23.2..."
+        wget https://go.dev/dl/go1.23.2.linux-amd64.tar.gz -O /tmp/go1.23.2.linux-amd64.tar.gz
+
+        log_message "INFO" "Extracting Go 1.23.2..."
+        sudo tar -C /usr/local -xzf /tmp/go1.23.2.linux-amd64.tar.gz
+
+        # Set Go environment variables
+        log_message "INFO" "Setting Go environment variables..."
+        echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.profile
+        source ~/.profile
+
+        # Create go environment configuration directory
+        mkdir -p ~/.config/go
+
+        # Set GOPROXY environment variable system-wide
+        cat << EOF > /etc/profile.d/go_proxy.sh
+export GOPROXY="http://${GO_CACHE}:${GO_CACHE_PORT},direct"
+EOF
+
+        # Make the script executable
+        chmod +x /etc/profile.d/go_proxy.sh
+
+        # Source the new environment
+        source /etc/profile.d/go_proxy.sh
+
+        # Test the connection to Go proxy
+        if ! curl -s "http://${GO_CACHE}:${GO_CACHE_PORT}/healthz" >/dev/null; then
+            handle_warning "Could not connect to Go module proxy. Check if it's running and accessible."
+        else
+            log_message "INFO" "Go module proxy configured successfully"
+        fi
+    else
+        log_message "INFO" "No Go module proxy specified, skipping configuration"
+    fi
+}
+
+configure_npm_cache() {
+    if [ -n "$NPM_CACHE" ]; then
+        log_message "INFO" "Configuring NPM registry cache..."
+
+        # Ensure npm is installed
+        if ! command -v npm >/dev/null 2>&1; then
+            log_message "INFO" "Installing Node.js and npm..."
+            curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+            apt install -y nodejs || handle_error "Failed to install Node.js and npm"
+        fi
+
+        # Configure npm to use the cache
+        npm config set registry "http://${NPM_CACHE}:${NPM_CACHE_PORT}" -g
+
+        # Test the connection to NPM cache
+        if ! curl -s "http://${NPM_CACHE}:${NPM_CACHE_PORT}/healthz" >/dev/null; then
+            handle_warning "Could not connect to NPM registry cache. Check if it's running and accessible."
+        else
+            log_message "INFO" "NPM registry cache configured successfully"
+        fi
+    else
+        log_message "INFO" "No NPM registry cache specified, skipping configuration"
     fi
 }
 
@@ -485,6 +571,20 @@ perform_final_checks() {
             handle_warning "DNS resolution test failed"
         fi
     fi
+
+    # Check Go proxy if configured
+    if [ -n "$GO_CACHE" ]; then
+        if ! curl -s "http://${GO_CACHE}:${GO_CACHE_PORT}/healthz" >/dev/null; then
+            handle_warning "Go module proxy check failed"
+        fi
+    fi
+    
+    # Check NPM cache if configured
+    if [ -n "$NPM_CACHE" ]; then
+        if ! curl -s "http://${NPM_CACHE}:${NPM_CACHE_PORT}/healthz" >/dev/null; then
+            handle_warning "NPM registry cache check failed"
+        fi
+    fi
     
     log_message "INFO" "Final system checks completed"
 }
@@ -530,6 +630,8 @@ optimize_system_settings
 add_github_keys
 configure_docker_mirror
 configure_pihole_dns
+configure_go_cache
+configure_npm_cache
 
 # Perform final tasks
 perform_final_checks
@@ -547,6 +649,14 @@ if [ -n "$DOCKER_MIRROR" ]; then
 fi
 if [ -n "$PIHOLE_DNS" ]; then
     echo -e "Pi-hole DNS Server: $PIHOLE_DNS"
+fi
+if [ -n "$GO_CACHE" ]; then
+    echo -e "Go Module Proxy: http://$GO_CACHE:$GO_CACHE_PORT"
+    echo -e "Go proxy environment variable has been set system-wide"
+fi
+if [ -n "$NPM_CACHE" ]; then
+    echo -e "NPM Registry Cache: http://$NPM_CACHE:$NPM_CACHE_PORT"
+    echo -e "NPM registry has been configured system-wide"
 fi
 
 echo -e "\nImportant Note: Please reboot the system to ensure all changes take effect."

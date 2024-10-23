@@ -12,6 +12,8 @@ INSTALL_APT_CACHE=false
 INSTALL_DOCKER_MIRROR=false
 INSTALL_PIHOLE=false
 INSTALL_GIT_CACHE=false
+INSTALL_GO_CACHE=false
+INSTALL_NPM_CACHE=false
 GITHUB_USER=""
 GITHUB_TOKEN=""
 GIT_CACHE_DIR="/var/cache/git-cache"
@@ -19,6 +21,8 @@ APT_CACHE_PORT=8000
 DOCKER_MIRROR_PORT=8001
 PIHOLE_WEB_PORT=8002
 GIT_CACHE_PORT=8003
+GO_CACHE_PORT=8004
+NPM_CACHE_PORT=8005
 TIMEZONE="America/New_York"
 
 # Colors and formatting
@@ -64,12 +68,14 @@ show_help() {
     echo "  --install-docker-mirror   Install Docker Registry Mirror"
     echo "  --install-pihole          Install Pi-hole"
     echo "  --install-git-cache       Install Git Proxy Cache"
+    echo "  --install-go-cache        Install Go module proxy cache"
+    echo "  --install-npm-cache       Install NPM registry cache"
     echo "  --github-user USERNAME    Specify the GitHub username for SSH key addition (required)"
     echo "  --github-token TOKEN      Specify the GitHub token for release script (required)"
     echo "  --timezone TIMEZONE       Set the timezone (default: America/New_York)"
     echo
     echo "Example:"
-    echo "  $0 --install-apt-cache --install-docker-mirror --install-pihole --install-git-cache --github-user YourGitHubUsername --github-token YourGitHubToken"
+    echo "  $0 --install-apt-cache --install-docker-mirror --install-pihole --install-git-cache --install-go-cache --install-npm-cache --github-user YourGitHubUsername --github-token YourGitHubToken"
 }
 
 parse_arguments() {
@@ -81,6 +87,8 @@ parse_arguments() {
             --install-docker-mirror) INSTALL_DOCKER_MIRROR=true ;;
             --install-pihole) INSTALL_PIHOLE=true ;;
             --install-git-cache) INSTALL_GIT_CACHE=true ;;
+            --install-go-cache) INSTALL_GO_CACHE=true ;;
+            --install-npm-cache) INSTALL_NPM_CACHE=true ;;
             --github-user) 
                 GITHUB_USER="$2"
                 if [ -z "$GITHUB_USER" ]; then
@@ -155,6 +163,16 @@ configure_ufw() {
         ufw allow $GIT_CACHE_PORT/tcp
     fi
     
+    if [ "$INSTALL_GO_CACHE" = true ]; then
+        ufw allow $GO_CACHE_PORT/tcp
+        log_message "INFO" "Opened UFW port $GO_CACHE_PORT for Go module proxy"
+    fi
+    
+    if [ "$INSTALL_NPM_CACHE" = true ]; then
+        ufw allow $NPM_CACHE_PORT/tcp
+        log_message "INFO" "Opened UFW port $NPM_CACHE_PORT for NPM registry cache"
+    fi
+
     # Enable UFW
     ufw --force enable
     
@@ -172,6 +190,8 @@ show_summary() {
     [ "$INSTALL_DOCKER_MIRROR" = true ] && echo -e "${GREEN}$CHECK_MARK${NC} Install Docker Registry Mirror (Port: $DOCKER_MIRROR_PORT)" || echo -e "${RED}$CROSS_MARK${NC} Skip Docker Registry Mirror"
     [ "$INSTALL_PIHOLE" = true ] && echo -e "${GREEN}$CHECK_MARK${NC} Install Pi-hole (Web Port: $PIHOLE_WEB_PORT, DNS: 53)" || echo -e "${RED}$CROSS_MARK${NC} Skip Pi-hole"
     [ "$INSTALL_GIT_CACHE" = true ] && echo -e "${GREEN}$CHECK_MARK${NC} Install Git Proxy Cache (Port: $GIT_CACHE_PORT)" || echo -e "${RED}$CROSS_MARK${NC} Skip Git Proxy Cache"
+    [ "$INSTALL_GO_CACHE" = true ] && echo -e "${GREEN}$CHECK_MARK${NC} Install Go module proxy cache (Port: $GO_CACHE_PORT)" || echo -e "${RED}$CROSS_MARK${NC} Skip Go module proxy cache"
+    [ "$INSTALL_NPM_CACHE" = true ] && echo -e "${GREEN}$CHECK_MARK${NC} Install NPM registry cache (Port: $NPM_CACHE_PORT)" || echo -e "${RED}$CROSS_MARK${NC} Skip NPM registry cache"
     echo -e "${GREEN}$CHECK_MARK${NC} Configure UFW firewall"
     echo -e "${GREEN}$CHECK_MARK${NC} Update and upgrade system packages"
     echo -e "${GREEN}$CHECK_MARK${NC} Install essential tools"
@@ -459,6 +479,191 @@ EOF
     log_message "INFO" "Gitea installed and configured on port $GIT_CACHE_PORT"
 }
 
+install_go_cache() {
+    log_message "INFO" "Installing Athens Go module proxy cache..."
+
+    # Install Go 1.23.2
+    log_message "INFO" "Downloading Go 1.23.2..."
+    wget https://go.dev/dl/go1.23.2.linux-amd64.tar.gz -O /tmp/go1.23.2.linux-amd64.tar.gz
+
+    log_message "INFO" "Extracting Go 1.23.2..."
+    sudo tar -C /usr/local -xzf /tmp/go1.23.2.linux-amd64.tar.gz
+
+    # Set Go environment variables
+    log_message "INFO" "Setting Go environment variables..."
+    echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.profile
+    source ~/.profile
+
+    # Create service user
+    useradd -r -m -d /home/athens athens
+
+    # Create necessary directories
+    mkdir -p /var/cache/athens
+    chown athens:athens /var/cache/athens
+    
+    # Clone Athens repository
+    source ~/.profile
+    mkdir -p /opt/athens
+    cd /opt/athens
+    git clone https://github.com/gomods/athens.git .
+    
+    # Build Athens
+    export GO111MODULE=on
+    export GOPROXY=https://proxy.golang.org
+    cd cmd/proxy
+    go build -buildvcs=false 
+    cp proxy /usr/local/bin/athens
+
+    # Ensure go binary is available and get its path
+    GO_PATH=$(which go)
+    if [ -z "$GO_PATH" ]; then
+        handle_error "Go binary not found. Is Go installed correctly?"
+    fi
+    
+    log_message "INFO" "Found Go at: $GO_PATH"
+
+    # Create config directory and configuration file
+    mkdir -p /etc/athens
+    cat << EOF > /etc/athens/config.toml
+GoBinary = "${GO_PATH}"
+GoEnv = "development"
+LogLevel = "debug"
+CloudRuntime = "none"
+NetworkMode = "strict"
+Timeout = 300
+DownloadMode = "sync"
+
+# Worker settings
+GoGetWorkers = 10
+ProtocolWorkers = 30
+
+# Storage configuration
+StorageType = "disk"
+
+# Network settings
+Port = ":${GO_CACHE_PORT}"
+Host = "0.0.0.0"
+
+# Storage path
+[Storage]
+    [Storage.Disk]
+        RootPath = "/var/cache/athens"
+EOF
+
+    # Set ownership
+    chown -R athens:athens /etc/athens
+    chown -R athens:athens /opt/athens
+
+    # Create systemd service
+    cat << EOF > /etc/systemd/system/athens.service
+[Unit]
+Description=Athens Go Module Proxy Cache
+After=network.target
+
+[Service]
+Type=simple
+User=athens
+Environment="GO111MODULE=on"
+Environment="ATHENS_STORAGE_TYPE=disk"
+Environment="ATHENS_DISK_STORAGE_ROOT=/var/cache/athens"
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+WorkingDirectory=/opt/athens
+ExecStart=/usr/local/bin/athens -config_file=/etc/athens/config.toml
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Start and enable service
+    systemctl daemon-reload
+    systemctl enable athens
+    systemctl start athens
+
+    # Verify service is running
+    sleep 5
+    if ! systemctl is-active --quiet athens; then
+        handle_error "Athens proxy failed to start. Check logs with: journalctl -u athens"
+        return 1
+    fi
+
+    LOCAL_IP=$(hostname -I | awk '{print $1}')
+    log_message "INFO" "Athens Go module proxy cache installed and configured on http://${LOCAL_IP}:${GO_CACHE_PORT}"
+    log_message "INFO" "To use this proxy, clients should set: export GOPROXY=http://${LOCAL_IP}:${GO_CACHE_PORT}"
+}
+
+install_npm_cache() {
+    log_message "INFO" "Installing NPM registry cache..."
+
+    # Install Node.js and npm
+    curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+    apt install -y nodejs
+
+    # Create service user
+    useradd -r -m -d /home/npmcache npmcache
+
+    # Create cache directory
+    mkdir -p /var/cache/npmcache
+    chown npmcache:npmcache /var/cache/npmcache
+
+    # Install Verdaccio
+    npm install -g verdaccio
+
+    # Create config file
+    mkdir -p /etc/verdaccio
+    cat << EOF > /etc/verdaccio/config.yaml
+storage: /var/cache/npmcache
+auth:
+  htpasswd:
+    file: /etc/verdaccio/htpasswd
+uplinks:
+  npmjs:
+    url: https://registry.npmjs.org/
+    maxage: 30m
+    timeout: 30s
+packages:
+  '@*/*':
+    access: \$all
+    proxy: npmjs
+  '**':
+    access: \$all
+    proxy: npmjs
+server:
+  keepAliveTimeout: 60
+listen: 0.0.0.0:${NPM_CACHE_PORT}
+EOF
+
+    # Create empty htpasswd file
+    touch /etc/verdaccio/htpasswd
+    chown -R npmcache:npmcache /etc/verdaccio
+
+    # Create systemd service
+    cat << EOF > /etc/systemd/system/verdaccio.service
+[Unit]
+Description=NPM Registry Cache (Verdaccio)
+After=network.target
+
+[Service]
+Type=simple
+User=npmcache
+ExecStart=/usr/bin/verdaccio --config /etc/verdaccio/config.yaml
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Start and enable service
+    systemctl daemon-reload
+    systemctl enable verdaccio
+    systemctl start verdaccio
+
+    # Add UFW rule
+    ufw allow ${NPM_CACHE_PORT}/tcp
+
+    log_message "INFO" "NPM registry cache installed and configured on port ${NPM_CACHE_PORT}"
+}
+
 install_essential_tools() {
     log_message "INFO" "Installing essential tools"
     
@@ -677,6 +882,8 @@ perform_final_checks() {
     [ "$INSTALL_DOCKER_MIRROR" = true ] && services+=("docker-registry")
     [ "$INSTALL_PIHOLE" = true ] && services+=("pihole-FTL")
     [ "$INSTALL_GIT_CACHE" = true ] && services+=("gitea")
+    [ "$INSTALL_GO_CACHE" = true ] && services+=("athens")
+    [ "$INSTALL_NPM_CACHE" = true ] && services+=("verdaccio")
     
     for service in "${services[@]}"; do
         if ! systemctl is-active --quiet "$service"; then
@@ -735,6 +942,8 @@ add_github_keys
 [ "$INSTALL_DOCKER_MIRROR" = true ] && install_docker_registry_mirror
 [ "$INSTALL_PIHOLE" = true ] && install_pihole
 [ "$INSTALL_GIT_CACHE" = true ] && install_git_cache
+[ "$INSTALL_GO_CACHE" = true ] && install_go_cache
+[ "$INSTALL_NPM_CACHE" = true ] && install_npm_cache
 
 # Setup release script
 setup_release_script
@@ -761,31 +970,36 @@ check_port() {
     fi
 }
 
-# Test APT-Cacher NG
-echo "Testing APT-Cacher NG..."
-check_service apt-cacher-ng
-check_port $APT_CACHE_PORT
+echo -e "\nTesting APT-Cacher NG port..."
+[ "$INSTALL_APT_CACHE" = true ] && {
+    check_port $APT_CACHE_PORT
+}
 
-# Test Docker Registry Mirror
-echo -e "\nTesting Docker Registry Mirror..."
-check_service docker-registry
-check_port $DOCKER_MIRROR_PORT
+echo -e "\nTesting Docker Registry Mirror port..."
+[ "$INSTALL_DOCKER_MIRROR" = true ] && {
+    check_port $DOCKER_MIRROR_PORT
+}
 
-# Test Pi-hole
-echo -e "\nTesting Pi-hole..."
-check_service pihole-FTL
-check_service lighttpd
-check_port 53  # DNS port
-check_port $PIHOLE_WEB_PORT
+echo -e "\nTesting Pi-hole port..."
+[ "$INSTALL_PIHOLE" = true ] && {
+    check_port 53  # DNS port
+    check_port $PIHOLE_WEB_PORT
+}
 
-# Test Gitea (Git cache)
-echo -e "\nTesting Gitea (Git cache)..."
-check_service gitea
-check_port $GIT_CACHE_PORT
+echo -e "\nTesting Gitea (Git cache) port..."
+[ "$INSTALL_GIT_CACHE" = true ] && {
+    check_port $GIT_CACHE_PORT
+}
 
-# Test Docker
-echo -e "\nTesting Docker..."
-check_service docker
+echo -e "\nTesting Go module proxy cache port..."
+[ "$INSTALL_GO_CACHE" = true ] && {
+    check_port $GO_CACHE_PORT
+}
+
+echo -e "\nTesting NPM registry cache port..."
+[ "$INSTALL_NPM_CACHE" = true ] && {
+    check_port $NPM_CACHE_PORT
+}
 
 # Test fail2ban
 echo -e "\nTesting fail2ban..."
@@ -835,6 +1049,8 @@ echo -e "\nService Information:"
 [ "$INSTALL_DOCKER_MIRROR" = true ] && echo "Docker Registry Mirror: http://$LOCAL_IP:$DOCKER_MIRROR_PORT"
 [ "$INSTALL_PIHOLE" = true ] && echo "Pi-hole Admin Interface: http://$LOCAL_IP:$PIHOLE_WEB_PORT"
 [ "$INSTALL_GIT_CACHE" = true ] && echo "Gitea Interface: http://$LOCAL_IP:$GIT_CACHE_PORT"
+[ "$INSTALL_GO_CACHE" = true ] && echo "Go Module Proxy: http://$LOCAL_IP:$GO_CACHE_PORT"
+[ "$INSTALL_NPM_CACHE" = true ] && echo "NPM Registry Cache: http://$LOCAL_IP:$NPM_CACHE_PORT"
 
 echo -e "\nImportant Note: Please reboot the system to ensure all changes take effect."
 echo -e "Log file location: $LOG_FILE"
