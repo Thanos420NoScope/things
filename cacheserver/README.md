@@ -30,6 +30,10 @@ Both server and client scripts include the following features:
 - Optional installation of Pi-hole (Port 8002, DNS 53)
 - Optional installation of Gitea (Port 8003)
 - Automatic GitHub release synchronization for mirrored repositories
+  - Centralizes all release downloads in a single repository
+  - Automatically syncs latest version downloads
+  - Maintains download links in an easy-to-access format
+  - Filters out unnecessary files (checksums, platform-specific builds)
 - UFW configured to allow required service ports
 - Integration with fail2ban for enhanced security
 
@@ -144,13 +148,17 @@ After installation:
    - Choose "GitHub"
    - Enter the repository URL
    - Tick "This repository will be a mirror"
+4. Access release downloads:
+   - All release downloads are centralized in the "releases" repository
+   - Each repository's latest version downloads are listed in the README
+   - Download links are provided in an easy-to-copy format
 
 ### Release Synchronization
 
 The `release.py` script is automatically installed and configured by the server setup script. It:
 - Runs every 30 minutes via cron
-- Synchronizes releases from GitHub to Gitea for all mirrored repositories
-- Uses the provided GitHub token for authentication
+- Synchronizes releases from GitHub to a central Gitea repository
+- Maintains a single repository ("releases") containing all downloads links
+- Filters out unnecessary files (checksums, platform-specific builds)
 - Logs all activities to the sync log file
 - Handles rate limiting and retries automatically
-- Maintains release metadata including descriptions, tags, and prerelease status
