@@ -9,11 +9,14 @@ import argparse
 import sys
 import urllib.parse
 import socket
+import fcntl
 from typing import Optional, Dict, List, Set
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import urllib3
+import hashlib
+import base64
 
 # Disable SSL verification warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -22,7 +25,6 @@ def get_local_ip():
     """Get the local IP address of the machine."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # We don't actually connect to this address, it's just to get the local IP
         s.connect(("8.8.8.8", 80))
         local_ip = s.getsockname()[0]
         s.close()
@@ -59,20 +61,79 @@ def setup_logging() -> logging.Logger:
     print("Could not initialize logging at any location")
     sys.exit(1)
 
+class LockFile:
+    def __init__(self, path):
+        self.path = Path(path)
+        self.lockfile = None
+
+    def __enter__(self):
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.lockfile = open(self.path, 'w')
+            fcntl.flock(self.lockfile.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.lockfile.write(f"{os.getpid()}\n{datetime.now().isoformat()}")
+            self.lockfile.flush()
+            return True
+        except (IOError, OSError):
+            if self.lockfile:
+                self.lockfile.close()
+            return False
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.lockfile:
+            fcntl.flock(self.lockfile.fileno(), fcntl.LOCK_UN)
+            self.lockfile.close()
+            try:
+                self.path.unlink()
+            except:
+                pass
+
+def calculate_file_hash(file_path: str) -> str:
+    """Calculate SHA256 hash of a file"""
+    sha256_hash = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for byte_block in iter(lambda: f.read(4096), b""):
+            sha256_hash.update(byte_block)
+    return sha256_hash.hexdigest()
+
+class ReleaseState:
+    def __init__(self, tag: str, repo_path: str):
+        self.tag = tag
+        self.repo_path = repo_path
+        self.assets: Dict[str, str] = {}  # filename -> hash
+        self.last_sync: Optional[str] = None
+        self.is_complete: bool = False
+
+    def to_dict(self) -> Dict:
+        return {
+            'tag': self.tag,
+            'repo_path': self.repo_path,
+            'assets': self.assets,
+            'last_sync': self.last_sync,
+            'is_complete': self.is_complete
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'ReleaseState':
+        state = cls(data['tag'], data['repo_path'])
+        state.assets = data.get('assets', {})
+        state.last_sync = data.get('last_sync')
+        state.is_complete = data.get('is_complete', False)
+        return state
+
 class GiteaReleaseSync:
     MAX_RELEASES_TO_SYNC = 5
+    LOCK_DIR = Path("/tmp/gitea_sync_locks")
+    RELEASES_REPO = "releases"
 
     def __init__(self, github_token: str):
         self.logger = logging.getLogger(__name__)
         self.logger.info("Initializing GiteaReleaseSync")
         
-        # Initialize state file path
         self.state_file = Path.home() / '.gitea_sync_state.json'
         self.sync_state = self._load_sync_state()
-        self.force_sync = False
         
         if not github_token:
-            self.logger.error("GitHub token is required")
             raise ValueError("GitHub token is required")
             
         self.gitea_url = "http://127.0.0.1:8003"
@@ -97,10 +158,7 @@ class GiteaReleaseSync:
         
         self.gitea_token = self._create_token()
         if not self.gitea_token:
-            self.logger.error("Failed to create Gitea token")
             raise ValueError("Could not create Gitea token")
-            
-        self.logger.info("Successfully obtained Gitea access token")
             
         self.headers_gitea = {
             'Authorization': f'token {self.gitea_token}',
@@ -111,21 +169,43 @@ class GiteaReleaseSync:
             'Accept': 'application/vnd.github.v3+json',
             'Authorization': f'token {self.github_token}'
         }
+
+        # Ensure releases repo exists
+        self._ensure_releases_repo()
+
     def _load_sync_state(self) -> Dict:
         """Load the sync state from file"""
         try:
             if self.state_file.exists():
                 with open(self.state_file, 'r') as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    # Convert stored release states to ReleaseState objects
+                    for repo_key in data.get('repos', {}):
+                        releases = data['repos'][repo_key].get('releases', {})
+                        data['repos'][repo_key]['releases'] = {
+                            tag: ReleaseState.from_dict(state_dict)
+                            for tag, state_dict in releases.items()
+                        }
+                    return data
         except Exception as e:
             self.logger.warning(f"Could not load sync state: {e}")
-        return {'repos': {}, 'last_sync': None}
+        return {'repos': {}}
 
     def _save_sync_state(self) -> None:
         """Save the current sync state to file"""
         try:
+            data = {'repos': {}}
+            for repo_key, repo_data in self.sync_state['repos'].items():
+                data['repos'][repo_key] = {
+                    'releases': {
+                        tag: state.to_dict()
+                        for tag, state in repo_data.get('releases', {}).items()
+                    },
+                    'last_sync': repo_data.get('last_sync')
+                }
+            
             with open(self.state_file, 'w') as f:
-                json.dump(self.sync_state, f)
+                json.dump(data, f, indent=2)
         except Exception as e:
             self.logger.error(f"Failed to save sync state: {e}")
 
@@ -142,7 +222,6 @@ class GiteaReleaseSync:
             if existing_tokens.status_code == 200:
                 for token in existing_tokens.json():
                     if token['name'].startswith('release-sync-'):
-                        self.logger.info(f"Deleting old token: {token['name']}")
                         requests.delete(
                             f"{self.gitea_url}/api/v1/users/{self.admin_user}/tokens/{token['id']}",
                             auth=(self.admin_user, self.admin_pass),
@@ -164,81 +243,258 @@ class GiteaReleaseSync:
             )
             
             response.raise_for_status()
-            token_info = response.json()
-            return token_info.get('sha1')
+            return response.json().get('sha1')
                 
         except Exception as e:
             self.logger.error(f"Error creating token: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                self.logger.error(f"Response content: {e.response.text}")
             return None
 
-    def get_all_gitea_mirrors(self) -> List[Dict]:
-        """Get all mirrored repositories from Gitea"""
-        self.logger.info("Fetching mirrored repositories from Gitea...")
-        all_mirrors = []
-        page = 1
-        
-        while True:
-            try:
-                response = requests.get(
-                    f"{self.gitea_url}/api/v1/repos/search",
-                    params={'q': '', 'mode': 'mirror', 'limit': 50, 'page': page},
+    def _ensure_releases_repo(self):
+        """Ensure the central releases repository exists and has README"""
+        try:
+            # Check if repo exists
+            response = requests.get(
+                f"{self.gitea_url}/api/v1/repos/{self.admin_user}/{self.RELEASES_REPO}",
+                headers=self.headers_gitea,
+                verify=False
+            )
+            
+            need_init = False
+            if response.status_code == 404:
+                # Create repo
+                create_data = {
+                    "name": self.RELEASES_REPO,
+                    "description": "Central repository for all mirrored releases",
+                    "private": False,
+                    "auto_init": True
+                }
+                
+                response = requests.post(
+                    f"{self.gitea_url}/api/v1/user/repos",
                     headers=self.headers_gitea,
-                    timeout=30,
+                    json=create_data,
                     verify=False
                 )
                 response.raise_for_status()
-                
-                data = response.json()
-                mirrors = data.get('data', [])
-                
-                if not mirrors:
-                    break
-                    
-                all_mirrors.extend(mirrors)
-                page += 1
-                
-            except Exception as e:
-                self.logger.error(f"Failed to get mirrored repositories page {page}: {e}")
-                break
-        
-        self.logger.info(f"Found {len(all_mirrors)} mirrored repositories")
-        return all_mirrors
-
-    def extract_github_info(self, url: str) -> Optional[Dict[str, str]]:
-        """Extract GitHub owner and repo from URL"""
-        self.logger.debug(f"Extracting GitHub info from URL: {url}")
-        
-        url = url.strip()
-        if not url:
-            return None
+                self.logger.info(f"Created releases repository: {self.RELEASES_REPO}")
+                need_init = True
+                # Give Gitea a moment to initialize the repo
+                time.sleep(2)
+            else:
+                response.raise_for_status()
+                self.logger.info(f"Found existing releases repository: {self.RELEASES_REPO}")
             
-        try:
-            if url.startswith('git@'):
-                pattern = r'git@github\.com:([^/]+)/([^/]+?)(?:\.git)?$'
-                match = re.search(pattern, url)
-                if match:
-                    return {
-                        'owner': match.group(1),
-                        'repo': match.group(2)
-                    }
+            # Check if README exists
+            response = requests.get(
+                f"{self.gitea_url}/api/v1/repos/{self.admin_user}/{self.RELEASES_REPO}/contents/README.md",
+                headers=self.headers_gitea,
+                verify=False
+            )
             
-            pattern = r'github\.com/([^/]+)/([^/\n.]+?)(?:\.git)?$'
-            match = re.search(pattern, url)
-            if match:
-                return {
-                    'owner': match.group(1),
-                    'repo': match.group(2)
+            if response.status_code == 404 or need_init:
+                # Initialize or update README
+                initial_content = (
+                    "# Mirrored Releases\n\n"
+                    "This repository contains the latest release downloads from various mirrored repositories.\n\n"
+                    "## Downloads\n"
+                    "Each section below contains download links for the latest version of each repository.\n\n"
+                )
+                content_base64 = base64.b64encode(initial_content.encode('utf-8')).decode('utf-8')
+                
+                readme_data = {
+                    "content": content_base64,
+                    "message": "Initialize README",
+                    "branch": "main"
                 }
                 
-            self.logger.warning(f"URL does not match expected GitHub patterns: {url}")
+                # If updating existing README, we need its SHA
+                if response.status_code == 200:
+                    readme_data["sha"] = response.json()["sha"]
+                
+                response = requests.put(
+                    f"{self.gitea_url}/api/v1/repos/{self.admin_user}/{self.RELEASES_REPO}/contents/README.md",
+                    headers=self.headers_gitea,
+                    json=readme_data,
+                    verify=False
+                )
+                response.raise_for_status()
+                self.logger.info("Initialized README in releases repository")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to ensure releases repository exists: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                self.logger.error(f"Response content: {e.response.text}")
+            raise
+
+    def _get_readme_content(self) -> Optional[Dict]:
+        """Get current README content and SHA"""
+        try:
+            response = requests.get(
+                f"{self.gitea_url}/api/v1/repos/{self.admin_user}/{self.RELEASES_REPO}/contents/README.md",
+                headers=self.headers_gitea,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                content = base64.b64decode(data['content']).decode('utf-8')
+                return {
+                    'content': content,
+                    'sha': data['sha']
+                }
             return None
             
         except Exception as e:
-            self.logger.error(f"Error extracting GitHub info from URL {url}: {e}")
+            self.logger.error(f"Failed to get README content: {e}")
             return None
+        
+    def _should_include_asset(self, filename: str) -> bool:
+        """Check if the asset should be included in the README"""
+        # Convert filename to lowercase for case-insensitive matching
+        filename_lower = filename.lower()
+        
+        # Files to exclude
+        exclude_patterns = [
+            '.md5', 
+            '.sha', 
+            'arm64',
+            'aarch64',
+            'osx',
+            'darwin',
+            'macos',
+            'freebsd',
+            'SHA256SUMS',
+            'checksums'
+        ]
+        
+        for pattern in exclude_patterns:
+            if pattern in filename_lower:
+                return False
+        return True
 
+    def _update_readme(self, owner: str, repo: str, releases: List[Dict]) -> bool:
+        """Update the central README with only latest release download links"""
+        try:
+            # Skip if no releases
+            if not releases:
+                return True
+
+            # Filter assets in latest release
+            latest_release = releases[0]
+            if not latest_release.get('assets'):
+                return True
+
+            # Only include wanted assets
+            filtered_assets = [
+                asset for asset in latest_release['assets']
+                if self._should_include_asset(asset['name'])
+            ]
+
+            # Skip if no assets after filtering
+            if not filtered_assets:
+                return True
+
+            # Get current README content
+            current_readme = self._get_readme_content()
+            if not current_readme:
+                self.logger.error("Failed to get current README content")
+                return False
+
+            # Parse existing content
+            content_lines = current_readme['content'].split('\n')
+            
+            # Find existing section
+            repo_section_start = -1
+            repo_section_end = -1
+            repo_header = f"## {owner}/{repo}"
+            for i, line in enumerate(content_lines):
+                if line.startswith(repo_header):
+                    repo_section_start = i
+                    for j in range(i + 1, len(content_lines)):
+                        if content_lines[j].startswith('## '):
+                            repo_section_end = j
+                            break
+                    if repo_section_end == -1:
+                        repo_section_end = len(content_lines)
+                    break
+
+            # Build new section
+            new_section = [
+                f"## {owner}/{repo}",
+                f"Version {latest_release['tag_name']}\n",
+                "### Downloads"
+            ]
+
+            # Add filtered downloads
+            for asset in filtered_assets:
+                filename = asset['name']
+                download_url = f"http://{self.local_ip}:8003/{self.admin_user}/{self.RELEASES_REPO}/releases/download/{latest_release['tag_name']}/{filename}"
+                new_section.append(f"* {filename}")
+                new_section.append(f"```bash")
+                new_section.append(f"{download_url}")
+                new_section.append(f"```\n")
+
+            # Add final separator
+            new_section.append("---\n")
+
+            # Update content
+            if repo_section_start == -1:
+                # Add new section at the end
+                if content_lines and content_lines[-1].strip() != "":
+                    content_lines.append("")
+                content_lines.extend(new_section)
+            else:
+                # Replace existing section
+                content_lines[repo_section_start:repo_section_end] = new_section
+
+            # Clean up content
+            content = '\n'.join(content_lines)
+            while '\n\n\n' in content:
+                content = content.replace('\n\n\n', '\n\n')
+
+            # Remove sections without downloads
+            final_lines = []
+            current_section = []
+            has_downloads = False
+            for line in content.split('\n'):
+                if line.startswith('## '):
+                    if current_section and has_downloads:
+                        final_lines.extend(current_section)
+                    current_section = [line]
+                    has_downloads = False
+                else:
+                    current_section.append(line)
+                    if line.strip().startswith('http://'):
+                        has_downloads = True
+            
+            # Add last section if it has downloads
+            if current_section and has_downloads:
+                final_lines.extend(current_section)
+
+            # Update README
+            final_content = '\n'.join(final_lines).strip() + '\n'
+            update_data = {
+                "content": base64.b64encode(final_content.encode('utf-8')).decode('utf-8'),
+                "message": f"Update release links for {owner}/{repo}",
+                "sha": current_readme['sha'],
+                "branch": "main"
+            }
+            
+            response = requests.put(
+                f"{self.gitea_url}/api/v1/repos/{self.admin_user}/{self.RELEASES_REPO}/contents/README.md",
+                headers=self.headers_gitea,
+                json=update_data,
+                verify=False
+            )
+            response.raise_for_status()
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to update README: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                self.logger.error(f"Response content: {e.response.text}")
+            return False
+        
     def github_request(self, url: str, params: Dict = None) -> requests.Response:
         """Make a request to GitHub API with rate limit handling"""
         max_retries = 3
@@ -248,8 +504,8 @@ class GiteaReleaseSync:
             try:
                 response = requests.get(
                     url,
-                    headers=self.headers_github,
                     params=params,
+                    headers=self.headers_github,
                     timeout=30
                 )
                 
@@ -330,11 +586,13 @@ class GiteaReleaseSync:
             self.logger.error(f"Failed to download asset from {url}: {e}")
             return None
 
-    def upload_asset(self, release_id: int, temp_path: str, filename: str, gitea_owner: str, gitea_repo: str) -> bool:
-        """Upload an asset to a Gitea release and store filename mapping"""
+    def upload_asset(self, release_id: int, temp_path: str, filename: str, release_state: ReleaseState) -> bool:
+        """Upload an asset to a release in the releases repository"""
         try:
-            upload_url = f"{self.gitea_url}/api/v1/repos/{gitea_owner}/{gitea_repo}/releases/{release_id}/assets"
-        
+            upload_url = f"{self.gitea_url}/api/v1/repos/{self.admin_user}/{self.RELEASES_REPO}/releases/{release_id}/assets"
+            
+            file_hash = calculate_file_hash(temp_path)
+            
             with open(temp_path, 'rb') as f:
                 files = {
                     'attachment': (
@@ -344,7 +602,7 @@ class GiteaReleaseSync:
                     )
                 }
                 headers = {'Authorization': f'token {self.gitea_token}'}
-            
+                
                 response = requests.post(
                     upload_url,
                     headers=headers,
@@ -353,55 +611,10 @@ class GiteaReleaseSync:
                     verify=False
                 )
                 response.raise_for_status()
-
-                asset_info = response.json()
-                asset_id = asset_info.get('id')
-            
-                # Get current release info
-                release_info = requests.get(
-                    f"{self.gitea_url}/api/v1/repos/{gitea_owner}/{gitea_repo}/releases/{release_id}",
-                    headers=self.headers_gitea,
-                    timeout=30,
-                    verify=False
-                ).json()
-            
-                current_body = release_info.get('body', '')
                 
-                # Remove old download links section if it exists
-                current_body = re.sub(r'⚠️ \*\*IMPORTANT: Use These Download Links\*\* ⚠️.*?⚠️ \*\*Ignore any download links below this section\*\* ⚠️', '', current_body, flags=re.DOTALL)
-            
-                # Get all assets for this release
-                assets_response = requests.get(
-                    f"{self.gitea_url}/api/v1/repos/{gitea_owner}/{gitea_repo}/releases/{release_id}/assets",
-                    headers=self.headers_gitea,
-                    timeout=30,
-                    verify=False
-                )
-                assets = assets_response.json()
-                
-                # Create new download links section at the top
-                download_links = "⚠️ **IMPORTANT: Use These Download Links** ⚠️\n\n"
-                for asset in assets:
-                    asset_name = asset['name']
-                    download_url = f"http://{self.local_ip}:8003/{gitea_owner}/{gitea_repo}/releases/download/{release_info['tag_name']}/{asset_name}"
-                    download_links += f"- {asset_name}\n  ```bash\n  {download_url}\n  ```\n"
-                download_links += "\n⚠️ **Ignore any download links below this section** ⚠️\n\n"
-                
-                # Combine the sections
-                updated_body = download_links + current_body.strip()
-            
-                # Update release body
-                update_data = {'body': updated_body}
-                requests.patch(
-                    f"{self.gitea_url}/api/v1/repos/{gitea_owner}/{gitea_repo}/releases/{release_id}",
-                    headers=self.headers_gitea,
-                    json=update_data,
-                    timeout=30,
-                    verify=False
-                )
-            
+                release_state.assets[filename] = file_hash
                 return True
-            
+                
         except Exception as e:
             self.logger.error(f"Failed to upload asset {filename}: {e}")
             return False
@@ -411,33 +624,86 @@ class GiteaReleaseSync:
             except:
                 pass
 
-    def _check_release_completeness(self, release_id: int, gitea_owner: str, gitea_repo: str, expected_assets: int) -> bool:
-        """Check if a release has all its assets in Gitea"""
-        try:
-            response = requests.get(
-                f"{self.gitea_url}/api/v1/repos/{gitea_owner}/{gitea_repo}/releases/{release_id}/assets",
-                headers=self.headers_gitea,
-                timeout=30,
-                verify=False
-            )
-            response.raise_for_status()
-            actual_assets = len(response.json())
-            return actual_assets >= expected_assets
-        except Exception as e:
-            self.logger.warning(f"Error checking release completeness: {e}")
-            return False
+    def get_all_gitea_mirrors(self) -> List[Dict]:
+        """Get all mirrored repositories from Gitea"""
+        self.logger.info("Fetching mirrored repositories from Gitea...")
+        all_mirrors = []
+        page = 1
+        
+        while True:
+            try:
+                response = requests.get(
+                    f"{self.gitea_url}/api/v1/repos/search",
+                    params={'q': '', 'mode': 'mirror', 'limit': 50, 'page': page},
+                    headers=self.headers_gitea,
+                    timeout=30,
+                    verify=False
+                )
+                response.raise_for_status()
+                
+                data = response.json()
+                mirrors = data.get('data', [])
+                
+                if not mirrors:
+                    break
+                    
+                all_mirrors.extend(mirrors)
+                page += 1
+                
+            except Exception as e:
+                self.logger.error(f"Failed to get mirrored repositories page {page}: {e}")
+                break
+        
+        self.logger.info(f"Found {len(all_mirrors)} mirrored repositories")
+        return all_mirrors
 
-    def get_normalized_tag(self, tag_name: str) -> str:
-        """Normalize tag name for comparison"""
-        return tag_name.lower().strip()
-
-    def sync_releases(self, github_owner: str, github_repo: str, gitea_owner: str, gitea_repo: str) -> None:
-        """Sync releases and their assets from GitHub to local Gitea"""
-        try:
-            # Get all GitHub releases
-            github_releases_url = f"https://api.github.com/repos/{github_owner}/{github_repo}/releases"
-            self.logger.info(f"Fetching GitHub releases from: {github_releases_url}")
+    def extract_github_info(self, url: str) -> Optional[Dict[str, str]]:
+        """Extract GitHub owner and repo from URL"""
+        self.logger.debug(f"Extracting GitHub info from URL: {url}")
+        
+        url = url.strip()
+        if not url:
+            return None
             
+        try:
+            if url.startswith('git@'):
+                pattern = r'git@github\.com:([^/]+)/([^/]+?)(?:\.git)?$'
+                match = re.search(pattern, url)
+                if match:
+                    return {
+                        'owner': match.group(1),
+                        'repo': match.group(2)
+                    }
+            
+            pattern = r'github\.com/([^/]+)/([^/\n.]+?)(?:\.git)?$'
+            match = re.search(pattern, url)
+            if match:
+                return {
+                    'owner': match.group(1),
+                    'repo': match.group(2)
+                }
+                
+            self.logger.warning(f"URL does not match expected GitHub patterns: {url}")
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"Error extracting GitHub info from URL {url}: {e}")
+            return None
+
+    def sync_releases(self, github_owner: str, github_repo: str) -> None:
+        """Sync releases from GitHub to local Gitea"""
+        repo_key = f"{github_owner}/{github_repo}"
+        
+        try:
+            # Initialize repo state if needed
+            if repo_key not in self.sync_state['repos']:
+                self.sync_state['repos'][repo_key] = {
+                    'releases': {},
+                    'last_sync': None
+                }
+
+            # Get GitHub releases
+            github_releases_url = f"https://api.github.com/repos/{github_owner}/{github_repo}/releases"
             github_response = self.github_request(github_releases_url)
             github_releases = github_response.json()
             
@@ -445,87 +711,70 @@ class GiteaReleaseSync:
                 self.logger.error(f"Unexpected GitHub API response format for {github_owner}/{github_repo}")
                 return
                 
-            self.logger.info(f"Found {len(github_releases)} releases on GitHub")
-
-            # Sort releases by published date and take only the latest MAX_RELEASES_TO_SYNC
+            # Sort and limit releases
             github_releases.sort(
                 key=lambda x: x.get('published_at', ''),
                 reverse=True
             )
             github_releases = github_releases[:self.MAX_RELEASES_TO_SYNC]
-            self.logger.info(f"Processing the {self.MAX_RELEASES_TO_SYNC} most recent releases")
 
-            # Get existing Gitea releases
-            gitea_releases_url = f"{self.gitea_url}/api/v1/repos/{gitea_owner}/{gitea_repo}/releases"
-            gitea_response = requests.get(
-                gitea_releases_url,
-                headers=self.headers_gitea,
-                timeout=30,
-                verify=False
-            )
-            gitea_response.raise_for_status()
-            
-            # Create map of existing releases with normalized tags
-            existing_releases = {
-                self.get_normalized_tag(release['tag_name']): release
-                for release in gitea_response.json()
-            }
-
-            for release in github_releases:
+            # Process each release
+            for github_release in github_releases:
                 try:
-                    tag_name = release['tag_name']
-                    normalized_tag = self.get_normalized_tag(tag_name)
+                    tag_name = github_release['tag_name']
+                    folder_path = github_repo
                     
-                    if normalized_tag not in existing_releases:
-                        self.logger.info(f"Creating release {tag_name}")
-                        
-                        release_data = {
-                            'tag_name': tag_name,
-                            'target_commitish': release['target_commitish'],
-                            'name': release['name'] or tag_name,
-                            'body': release['body'] or '',
-                            'draft': False,
-                            'prerelease': release['prerelease']
-                        }
+                    # Get or create release state
+                    release_state = self.sync_state['repos'][repo_key]['releases'].get(tag_name)
+                    if not release_state:
+                        release_state = ReleaseState(tag_name, folder_path)
+                        self.sync_state['repos'][repo_key]['releases'][tag_name] = release_state
 
-                        create_response = requests.post(
-                            gitea_releases_url,
+                    # Create release in central repo if needed
+                    release_data = {
+                        'tag_name': tag_name,
+                        'name': github_release['name'] or tag_name,
+                        'body': github_release['body'] or '',
+                        'draft': False,
+                        'prerelease': github_release['prerelease']
+                    }
+
+                    response = requests.post(
+                        f"{self.gitea_url}/api/v1/repos/{self.admin_user}/{self.RELEASES_REPO}/releases",
+                        headers=self.headers_gitea,
+                        json=release_data,
+                        verify=False
+                    )
+                    
+                    if response.status_code not in [201, 409]:  # 409 means release already exists
+                        response.raise_for_status()
+                    
+                    release_id = response.json().get('id') if response.status_code == 201 else None
+                    
+                    # Get existing release if needed
+                    if not release_id:
+                        releases_response = requests.get(
+                            f"{self.gitea_url}/api/v1/repos/{self.admin_user}/{self.RELEASES_REPO}/releases",
                             headers=self.headers_gitea,
-                            json=release_data,
-                            timeout=30,
                             verify=False
                         )
-                        create_response.raise_for_status()
-                        release_id = create_response.json()['id']
-                        self.logger.info(f"Created release {tag_name}")
-
-                        # Add to existing releases map
-                        existing_releases[normalized_tag] = create_response.json()
-                    else:
-                        release_id = existing_releases[normalized_tag]['id']
-                        self.logger.info(f"Found existing release {tag_name}")
-
-                    if release.get('assets'):
-                        self.logger.info(f"Checking {len(release['assets'])} assets for release {tag_name}")
+                        releases_response.raise_for_status()
                         
-                        existing_assets_response = requests.get(
-                            f"{self.gitea_url}/api/v1/repos/{gitea_owner}/{gitea_repo}/releases/{release_id}/assets",
-                            headers=self.headers_gitea,
-                            timeout=30,
-                            verify=False
-                        )
-                        existing_assets = {
-                            asset['name'].lower(): asset 
-                            for asset in existing_assets_response.json()
-                        }
+                        for release in releases_response.json():
+                            if release['tag_name'] == tag_name:
+                                release_id = release['id']
+                                break
 
-                        for asset in release['assets']:
-                            asset_name = asset['name'].lower()
-                            if asset_name in existing_assets:
-                                self.logger.debug(f"Asset {asset['name']} already exists, skipping")
+                    # Process assets
+                    if github_release.get('assets'):
+                        for asset in github_release['assets']:
+                            asset_name = asset['name']
+                            
+                            # Skip if asset exists
+                            if asset_name in release_state.assets:
                                 continue
                                 
-                            self.logger.info(f"Downloading asset: {asset['name']}")
+                            # Download and upload asset
                             download_result = self.download_asset(
                                 asset['browser_download_url'],
                                 self.headers_github
@@ -533,24 +782,29 @@ class GiteaReleaseSync:
                             
                             if download_result:
                                 temp_path, filename = download_result
-                                if self.upload_asset(release_id, temp_path, filename, gitea_owner, gitea_repo):
+                                if self.upload_asset(release_id, temp_path, filename, release_state):
                                     self.logger.info(f"Successfully uploaded asset: {filename}")
                                 else:
                                     self.logger.error(f"Failed to upload asset: {filename}")
-                
+
+                    # Update release state
+                    release_state.last_sync = datetime.now(timezone.utc).isoformat()
+                    release_state.is_complete = True
+                    self._save_sync_state()
+                    
                 except Exception as e:
-                    self.logger.error(f"Failed to process release {release.get('tag_name', 'unknown')}: {e}")
+                    self.logger.error(f"Failed to process release {tag_name}: {e}")
                     continue
 
-            # Update sync state for this repository
-            repo_key = f"{github_owner}/{github_repo}"
-            if not self.sync_state['repos'].get(repo_key):
-                self.sync_state['repos'][repo_key] = {}
+            # Update README with all releases
+            self._update_readme(github_owner, github_repo, github_releases)
+
+            # Update repo last sync time
             self.sync_state['repos'][repo_key]['last_sync'] = datetime.now(timezone.utc).isoformat()
             self._save_sync_state()
 
         except Exception as e:
-            self.logger.error(f"Failed to sync releases for {github_owner}/{github_repo} to {gitea_owner}/{gitea_repo}: {e}")
+            self.logger.error(f"Failed to sync releases for {repo_key}: {e}")
 
 def main():
     logger = setup_logging()
@@ -558,7 +812,6 @@ def main():
     
     parser = argparse.ArgumentParser(description='Sync GitHub releases to Gitea')
     parser.add_argument('--github-token', '-t', required=True, help='GitHub Personal Access Token')
-    parser.add_argument('--force-sync', '-f', action='store_true', help='Force sync all releases ignoring last sync time')
     
     try:
         args = parser.parse_args()
@@ -566,18 +819,9 @@ def main():
         logger.error(f"Error parsing arguments: {e}")
         sys.exit(1)
 
-    if not args.github_token:
-        logger.error("GitHub token is required")
-        sys.exit(1)
-
     try:
         logger.info("Starting release sync process")
         syncer = GiteaReleaseSync(args.github_token)
-        
-        # Set force sync flag if specified
-        if args.force_sync:
-            logger.info("Force sync requested - will sync all releases")
-            syncer.force_sync = True
         
         # Test GitHub token validity
         try:
@@ -617,22 +861,10 @@ def main():
                     continue
 
                 logger.info(f"Found GitHub repo: {github_info['owner']}/{github_info['repo']}")
-
-                gitea_owner = mirror.get('owner', {}).get('username') or mirror.get('owner_name')
-                gitea_repo = mirror.get('name')
-
-                if not gitea_owner or not gitea_repo:
-                    logger.error(f"Missing owner or repo info for mirror: {mirror_url}")
-                    continue
-
-                logger.info(f"Syncing releases: GitHub:{github_info['owner']}/{github_info['repo']} → "
-                           f"Gitea:{gitea_owner}/{gitea_repo}")
                 
                 syncer.sync_releases(
                     github_info['owner'],
-                    github_info['repo'],
-                    gitea_owner,
-                    gitea_repo
+                    github_info['repo']
                 )
                 
             except Exception as e:
